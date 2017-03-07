@@ -34,177 +34,17 @@ extern "C"
 #include <fcntl.h>
 #include <poll.h>
 #include <arpa/inet.h>
+
+#include "miscdef.h"
+#include "service/mcu.h"
+#include "misc/pattern.h"
 }
 
 #include <exception>
 
-#define APPMEMTYPE (*(u32*)0x1FF80030)
-
-extern "C" void __system_allocateHeaps(void)
-{
-    extern char* fake_heap_start;
-    extern char* fake_heap_end;
-    
-    extern u32 __ctru_heap;
-    extern u32 __ctru_heap_size;
-    extern u32 __ctru_linear_heap;
-    extern u32 __ctru_linear_heap_size;
-    
-    extern int __stacksize__;
-    
-    u32 tmp = 0;
-    Result res = 0;
-    
-    // Distribute available memory into halves, aligning to page size.
-    //u32 size = (osGetMemRegionFree(MEMREGION_SYSTEM) / 2) & 0xFFFFF000;
-    __ctru_heap_size = APPMEMTYPE > 5 ? 0x320000 : 0x84000;
-    __ctru_linear_heap_size = APPMEMTYPE > 5 ? 0x2A0000 : 0x1000;
-    
-    if(APPMEMTYPE > 5) __stacksize__ = 0x10000; else __stacksize__ = 0x8000;
-    
-    //*(u32*)0x00100998 = size;
-    
-    
-    // Allocate the application heap6
-    __ctru_heap = 0x08000000;
-    res = svcControlMemory(&tmp, __ctru_heap, 0x0, __ctru_heap_size, (MemOp)MEMOP_ALLOC, (MemPerm)(MEMPERM_READ | MEMPERM_WRITE));
-    if(res < 0) *(u32*)0x00100100 = res;
-    
-    // Allocate the linear heap
-    //__ctru_linear_heap = 0x14000000;
-    //svcControlMemory(&tmp, 0x1C000000 - __ctru_linear_heap_size, 0x0, __ctru_linear_heap_size, (MemOp)MEMOP_FREE, (MemPerm)(0));
-    res = svcControlMemory(&__ctru_linear_heap, 0x0, 0x0, __ctru_linear_heap_size, (MemOp)MEMOP_ALLOC_LINEAR, (MemPerm)(MEMPERM_READ | MEMPERM_WRITE));
-    if(res < 0) *(u32*)0x00100200 = res;
-    if(__ctru_linear_heap < 0x10000000) *(u32*)0x00100071 = __ctru_linear_heap;
-    
-    // Set up newlib heap
-    fake_heap_start = (char*)__ctru_heap;
-    fake_heap_end = fake_heap_start + __ctru_heap_size;
-}
 
 
-extern "C"
-{
-    u8 gfxThreadID;
-    u8* gfxSharedMemory;
-    Handle gspEvent, gspSharedMemHandle;
-}
-
-void gxInit()
-{
-    gfxSharedMemory = (u8*)mappableAlloc(0x1000);
-    svcCreateEvent(&gspEvent, RESET_ONESHOT);
-    GSPGPU_RegisterInterruptRelayQueue(gspEvent, 0x1, &gspSharedMemHandle, &gfxThreadID);
-    svcMapMemoryBlock(gspSharedMemHandle, (u32)gfxSharedMemory, (MemPerm)0x3, (MemPerm)0x10000000);
-    gxCmdBuf=(u32*)(gfxSharedMemory+0x800+gfxThreadID*0x200);
-    gspInitEventHandler(gspEvent, (vu8*) gfxSharedMemory, gfxThreadID);
-    gspWaitForVBlank();
-}
-
-void gxExit()
-{
-    gspExitEventHandler();
-    svcUnmapMemoryBlock(gspSharedMemHandle, (u32)gfxSharedMemory);
-    GSPGPU_UnregisterInterruptRelayQueue();
-    svcCloseHandle(gspSharedMemHandle);
-    mappableFree(gfxSharedMemory);
-    svcCloseHandle(gspEvent);
-}
-
-
-Handle mcuHandle = 0;
-
-Result mcuInit()
-{
-    return srvGetServiceHandle(&mcuHandle, "mcu::HWC");
-}
-
-Result mcuExit()
-{
-    return svcCloseHandle(mcuHandle);
-}
-
-Result mcuReadRegister(u8 reg, void* data, u32 size)
-{
-    u32* ipc = getThreadCommandBuffer();
-    ipc[0] = 0x10082;
-    ipc[1] = reg;
-    ipc[2] = size;
-    ipc[3] = size << 4 | 0xC;
-    ipc[4] = (u32)data;
-    Result ret = svcSendSyncRequest(mcuHandle);
-    if(ret < 0) return ret;
-    return ipc[1];
-}
-
-Result mcuWriteRegister(u8 reg, void* data, u32 size)
-{
-    u32* ipc = getThreadCommandBuffer();
-    ipc[0] = 0x20082;
-    ipc[1] = reg;
-    ipc[2] = size;
-    ipc[3] = size << 4 | 0xA;
-    ipc[4] = (u32)data;
-    Result ret = svcSendSyncRequest(mcuHandle);
-    if(ret < 0) return ret;
-    return ipc[1];
-}
-
-
-typedef struct
-{
-    u32 ani;
-    u8 r[32];
-    u8 g[32];
-    u8 b[32];
-} RGBLedPattern;
-
-RGBLedPattern pat;
-
-void PatApply()
-{
-    mcuWriteRegister(0x2D, &pat, sizeof(pat));
-}
-
-void PatTrigger()
-{
-    mcuWriteRegister(0x2D, &pat, 4);
-}
-
-void PatStay(u32 col)
-{
-    memset(&pat.r[0], (col >>  0) & 0xFF, 32);
-    memset(&pat.g[0], (col >>  8) & 0xFF, 32);
-    memset(&pat.b[0], (col >> 16) & 0xFF, 32);
-    
-    pat.ani = 0xFF0201;
-    
-    PatApply();
-}
-
-void PatPulse(u32 col)
-{
-    memset(&pat.r[ 0], 0xFF, 4);
-    memset(&pat.g[ 0], 0xFF, 4);
-    memset(&pat.b[ 0], 0xFF, 4);
-    memset(&pat.r[ 4], 0, 4);
-    memset(&pat.g[ 4], 0, 4);
-    memset(&pat.b[ 4], 0, 4);
-    memset(&pat.r[ 8], (col >>  0) & 0xFF, 8);
-    memset(&pat.g[ 8], (col >>  8) & 0xFF, 8);
-    memset(&pat.b[ 8], (col >> 16) & 0xFF, 8);
-    memset(&pat.r[16], 0, 4);
-    memset(&pat.g[16], 0, 4);
-    memset(&pat.b[16], 0, 4);
-    
-    pat.ani = 0xFF0306;
-    
-    PatApply();
-}
-
-
-
-#define wah() svcSleepThread(1e8)
+#define yield() svcSleepThread(1e8)
 
 #define hangmacro()\
 {\
@@ -223,25 +63,19 @@ void PatPulse(u32 col)
         {\
             goto killswitch;\
         }\
-        wah();\
+        yield();\
     }\
 }
 
 static int haznet = 0;
-
-int wait4wifi(int ping_once)\
-{\
-    haznet = 0;\
-    while(1)\
-    {\
-        u32 wifi = 0;\
-        hidScanInput();\
-        if(hidKeysHeld() == (KEY_SELECT | KEY_START)) return 0;\
-        if(ACU_GetWifiStatus(&wifi) >= 0 && wifi) { haznet = 1; break; }\
-        if(ping_once) return 0;\
-        wah();\
-    }\
-    return haznet;\
+int checkwifi()
+{
+    haznet = 0;
+    u32 wifi = 0;
+    hidScanInput();
+    if(hidKeysHeld() == (KEY_SELECT | KEY_START)) return 0;
+    if(ACU_GetWifiStatus(&wifi) >= 0 && wifi) haznet = 1;
+    return haznet;
 }
 
 
@@ -331,38 +165,24 @@ public:
         return offs;
     }
     
-    int wriptr(u32 siz, void* ptr, int flags = 0)
+    int wribufc(int flags = 0)
     {
-        packet* p = pack();
-        u32 osiz = p->size;
-        p->size += siz;
-        
-        int mustwri = osiz + 4;
+        int mustwri = pack()->size + 4;
         int offs = 0;
         int ret = 0;
-        while(mustwri)
-        {
-            ret = send(sock, buf + offs , mustwri, flags);
-            if(ret < 0) return -errno;
-            mustwri -= ret;
-            offs += ret;
-        }
-        
-        mustwri = siz;
-        offs = 0;
         
         while(mustwri)
         {
-            if(mustwri > 0x1000)
-                ret = send(sock, ptr + offs , 0x1000, flags);
+            if(mustwri >> 12)
+                ret = send(sock, buf + offs , 0x1000, flags);
             else
-                ret = send(sock, ptr + offs , mustwri, flags);
+                ret = send(sock, buf + offs , mustwri, flags);
             if(ret < 0) return -errno;
             mustwri -= ret;
             offs += ret;
         }
         
-        return osiz + siz + 4;
+        return offs;
     }
     
     packet* pack()
@@ -403,7 +223,7 @@ public:
 static jmp_buf __exc;
 static int  __excno;
 
-void _ded()
+void CPPCrashHandler()
 {
     puts("\e[0m\n\n- The application has crashed\n\n");
     
@@ -445,8 +265,6 @@ void _ded()
 
 extern "C" u32 __get_bytes_per_pixel(GSPGPU_FramebufferFormats format);
 
-#include "makerave.h"
-
 const int port = 6464;
 
 static u32 kDown = 0;
@@ -483,9 +301,6 @@ static u32* screenbuf = nullptr;
 void netfunc(void* __dummy_arg__)
 {
     u32 siz = 0x80;
-    
-    u32 fbtop = 0x14000000;
-    u32 fbbot = 0x14000000;
     
     if(!isold) osSetSpeedupEnable(1);
     
@@ -546,15 +361,8 @@ void netfunc(void* __dummy_arg__)
         
         if(!soc) break;
         
-        ///if(1)
         if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
         {
-            //GSPGPU_ReadHWRegs(0x400468, &fbtop, 4);
-            //GSPGPU_ReadHWRegs(0x400494, &fbtop, 4);
-            
-            //if((u32)capin.screencapture[0].framebuf0_vaddr < 0x1C000000)
-            //    *((u32*)&capin.screencapture[0].framebuf0_vaddr) += 0x1C000000;
-            
             if\
             (\
                 capin.screencapture[0].format != format[0]\
@@ -582,7 +390,6 @@ void netfunc(void* __dummy_arg__)
                 soc->wribuf();
             }
             
-            //if(fbtop >= 0x14008000)
             // yes, I know this indentation is cancer
             // also, I know I'm a lazy fuck for only allowing VRAM framebuffers
             //TODO find a way to read from LINEARmemeory without AcquireRights
@@ -599,27 +406,6 @@ void netfunc(void* __dummy_arg__)
                 k->size = siz;
                 *(u32*)k->data = siz * offs[0];
                 memcpy(k->data + 4, ((u8*)capin.screencapture[0].framebuf0_vaddr) + *(u32*)k->data, siz);
-                
-                /*
-                GSPGPU_AcquireRight(0);
-                Result res = GX_TextureCopy\
-                (\
-                        capin.screencapture[0].framebuf0_vaddr,\
-                        0,\
-                        screenbuf,\
-                        0,\
-                        320 * 240 * 4, BIT(3)\
-                );
-                if(res < 0)
-                {
-                    *(u32*)0x00100000 = res;
-                }
-                else svcSleepThread(5e7);//gspWaitForPPF();
-                GSPGPU_ReleaseRight();
-                
-                memcpy(k->data + 4, screenbuf, siz);
-                //memcpy(k->data + 4, ((u8*)fbtop) + *(u32*)k->data, siz);
-                */
                 
                 if(++offs[0] == limit[0]) offs[0] = 0;
                 k->size += 4;
@@ -662,7 +448,7 @@ void netfunc(void* __dummy_arg__)
             
             //gspWaitForVBlank();
         }
-        else wah();
+        else yield();
     }
     
     memset(&pat.r[0], 0xFF, 16);
@@ -685,8 +471,6 @@ void netfunc(void* __dummy_arg__)
 
 int main()
 {
-    int hazgui = 0;
-    
     mcuInit();
     
     memset(&pat, 0, sizeof(pat));
@@ -694,7 +478,7 @@ int main()
     
     isold = APPMEMTYPE <= 5;
     
-    //if(1)
+    
     if(isold)
     {
         limit[0] = 2;
@@ -733,24 +517,24 @@ int main()
     if((__excno = setjmp(__exc))) goto killswitch;
       
 #ifdef _3DS
-    std::set_unexpected(_ded);
-    std::set_terminate(_ded);
+    std::set_unexpected(CPPCrashHandler);
+    std::set_terminate(CPPCrashHandler);
 #endif
     
     netreset:
     
-    if(wait4wifi(1))
+    if(checkwifi())
     {
         if(errno == EINVAL)
         {
             errno = 0;
             PatStay(0xFFFF);
-            while(wait4wifi(1)) wah();
+            while(checkwifi()) yield();
         }
     }
     else PatStay(0xFFFF);
     
-    if(wait4wifi(1))
+    if(checkwifi())
     {
         cy = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
         if(cy <= 0)
@@ -804,7 +588,7 @@ int main()
         {
             if(!haznet)
             {
-                if(wait4wifi(1)) goto netreset;
+                if(checkwifi()) goto netreset;
             }
             else if(pollsock(sock, POLLIN) == POLLIN)
             {
@@ -821,7 +605,7 @@ int main()
                     
                     if(isold)
                     {
-                        netthread = threadCreate(netfunc, nullptr, 0x400, 8, 1, true);
+                        netthread = threadCreate(netfunc, nullptr, 0x400, 8, 0, true);
                     }
                     else
                     {
@@ -841,7 +625,7 @@ int main()
                     
                     if(netthread)
                     {
-                        while(!threadrunning) wah();
+                        while(!threadrunning) yield();
                     }
                     else
                     {
@@ -865,20 +649,6 @@ int main()
             goto reloop;
         }
         
-        /*if((kDown & (KEY_ZL | KEY_ZR)) && kHeld == (KEY_ZL | KEY_ZR))
-        {
-            hazgui = !hazgui;
-            
-            if(hazgui)
-            {
-                GSPGPU_AcquireRight(0x1);
-            }
-            else
-            {
-                GSPGPU_ReleaseRight();
-            }
-        }*/
-        
         if((kHeld & (KEY_ZL | KEY_ZR)) == (KEY_ZL | KEY_ZR))
         {
             u32* ptr = (u32*)0x1F000000;
@@ -886,7 +656,7 @@ int main()
             while(o--) *(ptr++) = rand();
         }
         
-        wah();
+        yield();
     }
     
     killswitch:
@@ -897,7 +667,7 @@ int main()
     {
         threadrunning = 0;
         
-        while(soc) wah();
+        while(soc) yield();
     }
     
     if(soc) delete soc;

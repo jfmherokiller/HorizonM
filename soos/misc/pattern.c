@@ -1,6 +1,51 @@
-#pragma once
+#include "pattern.h"
 
-void makerave()
+
+
+RGBLedPattern pat;
+
+void PatApply()
+{
+    mcuWriteRegister(0x2D, &pat, sizeof(pat));
+}
+
+void PatTrigger()
+{
+    mcuWriteRegister(0x2D, &pat, 4);
+}
+
+void PatStay(u32 col)
+{
+    memset(&pat.r[0], (col >>  0) & 0xFF, 32);
+    memset(&pat.g[0], (col >>  8) & 0xFF, 32);
+    memset(&pat.b[0], (col >> 16) & 0xFF, 32);
+    
+    pat.ani = 0xFF0201;
+    
+    PatApply();
+}
+
+void PatPulse(u32 col)
+{
+    memset(&pat.r[ 0], 0xFF, 4);
+    memset(&pat.g[ 0], 0xFF, 4);
+    memset(&pat.b[ 0], 0xFF, 4);
+    memset(&pat.r[ 4], 0, 4);
+    memset(&pat.g[ 4], 0, 4);
+    memset(&pat.b[ 4], 0, 4);
+    memset(&pat.r[ 8], (col >>  0) & 0xFF, 8);
+    memset(&pat.g[ 8], (col >>  8) & 0xFF, 8);
+    memset(&pat.b[ 8], (col >> 16) & 0xFF, 8);
+    memset(&pat.r[16], 0, 4);
+    memset(&pat.g[16], 0, 4);
+    memset(&pat.b[16], 0, 4);
+    
+    pat.ani = 0xFF0306;
+    
+    PatApply();
+}
+
+void setrave()
 {
     //marcus@Werkstaetiun:/media/marcus/WESTERNDIGI/dev_threedee/MCU_examples/RGB_rave$ lua assets/colorgen.lua
     pat.r[0] = 128;
@@ -99,8 +144,10 @@ void makerave()
     pat.b[29] = 1;
     pat.b[30] = 2;
     pat.b[31] = 8;
-    
-    pat.ani = 0x20;
-    
+}
+
+void makerave()
+{
+    setrave();
     PatApply();
-} 
+}
