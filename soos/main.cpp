@@ -38,6 +38,8 @@ extern "C"
 #include "miscdef.h"
 #include "service/mcu.h"
 #include "misc/pattern.h"
+#include "tga/targa.h"
+//#include "lz4/lz4.h"
 }
 
 #include <exception>
@@ -149,7 +151,7 @@ public:
         return offs;
     }
     
-    int wribuf(int flags = 0)
+    int wribuf_old(int flags = 0)
     {
         int mustwri = pack()->size + 4;
         int offs = 0;
@@ -165,7 +167,7 @@ public:
         return offs;
     }
     
-    int wribufc(int flags = 0)
+    int wribuf(int flags = 0)
     {
         int mustwri = pack()->size + 4;
         int offs = 0;
@@ -298,6 +300,8 @@ static vu32 threadrunning = 0;
 
 static u32* screenbuf = nullptr;
 
+static tga_image img;
+
 void netfunc(void* __dummy_arg__)
 {
     u32 siz = 0x80;
@@ -402,13 +406,31 @@ void netfunc(void* __dummy_arg__)
             {
                 siz = (capin.screencapture[0].framebuf_widthbytesize * stride[0]);
                 
+                u32 bsiz = capin.screencapture[0].framebuf_widthbytesize / 240;
+                u32 scrw = capin.screencapture[0].framebuf_widthbytesize / bsiz;
+                u32 fboffs = siz * offs[0];
+                u32 bits = 4 << bsiz;
+                
+                if((format[0] & 7) == 2) bits = 17;
+                if((format[0] & 7) == 4) bits = 18;
+                
                 k->packetid = 3; //DATA
-                k->size = siz;
-                *(u32*)k->data = siz * offs[0];
-                memcpy(k->data + 4, ((u8*)capin.screencapture[0].framebuf0_vaddr) + *(u32*)k->data, siz);
+                k->size = 0;
+                
+                memcpy(screenbuf, ((u8*)capin.screencapture[0].framebuf0_vaddr) + fboffs, siz);
+                
+                
+                int imgsize = 0;
+                
+                init_tga_image(&img, (u8*)screenbuf, scrw, stride[0], bits);
+                img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
+                img.origin_y = offs[0] * stride[0];
+                tga_write_to_FILE(k->data, &img, &imgsize);
+                
+                k->size = imgsize;
                 
                 if(++offs[0] == limit[0]) offs[0] = 0;
-                k->size += 4;
+                //k->size += 4;
                 soc->wribuf();
                 
             }
@@ -424,6 +446,7 @@ void netfunc(void* __dummy_arg__)
                 svcSleepThread(1e9);
             }
             
+            /*
             if\
             (\
                 (u32)capin.screencapture[1].framebuf0_vaddr >= 0x1F000000\
@@ -442,7 +465,7 @@ void netfunc(void* __dummy_arg__)
                 *(u32*)k->data += 256 * 400 * 4;
                 soc->wribuf();
                 
-            }
+            }*/
             
             //svcSleepThread(2e7);
             
@@ -511,7 +534,7 @@ int main()
     
     //gxInit();
     
-    screenbuf = (u32*)linearAlloc(400 * 240 * 4);
+    screenbuf = (u32*)linearAlloc(400 * 256 * 4);
     
     
     if((__excno = setjmp(__exc))) goto killswitch;

@@ -29,6 +29,9 @@ typedef struct pollfd WSAPOLLFD;
 #include <poll.h>
 
 #include "inet_pton.h"
+
+#include "tga/targa.h"
+//#include "lz4/lz4.h"
 }
 
 #ifdef WIN32
@@ -52,7 +55,8 @@ u32 fpstick = 0;
 int currwrite = 0;
 int oldwrite = 0;
 
-#define errfail(func) { printf("\n" #func " fail: (%i) %s\n", errno, strerror(errno)); goto killswitch; }
+#define errfail(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, errno, strerror(errno)); goto killswitch; }
+#define errtga(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, res, tga_error(res)); goto killswitch; }
 
 
 int pollsock(SOCKET sock, int wat, int timeout = 0)
@@ -273,6 +277,9 @@ int stride[2] = {480, 480};
 int bsiz[2] = {2, 2};
 int ret = 0;
 
+tga_image tga;
+tga_result res;
+
 
 int main(int argc, char** argv)
 {
@@ -355,7 +362,7 @@ int main(int argc, char** argv)
     
     while(PumpEvent())
     {
-        if(!soc->avail()) goto nocoffei;
+        //if(!soc->avail()) goto nocoffei;
         
         ret = soc->readbuf();
         if(ret <= 0) errfail(soc->readbuf);
@@ -385,9 +392,11 @@ int main(int argc, char** argv)
             
             case 3:
             {
-                memcpy(sbuf + *(u32*)p->data, p->data + 4, p->size);
+                tga.image_data = sbuf;
+                res = tga_read_from_FILE(&tga, p->data);
+                if(res) errtga(read_from_FILE);
                 
-                if(!*(u32*)p->data)
+                if(!tga.origin_y)
                 {
                     u32 prev = SDL_GetTicks() - fpstick;
                     fpsticks[currwrite++] = prev;
