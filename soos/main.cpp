@@ -36,11 +36,11 @@ extern "C"
 #include <arpa/inet.h>
 
 #include "miscdef.h"
+//#include "service/screen.h"
 #include "service/mcu.h"
 #include "misc/pattern.h"
 
 #include "tga/targa.h"
-#include "lz4/lz4.h"
 #include <turbojpeg.h>
 }
 
@@ -55,10 +55,10 @@ extern "C"
     memset(&pat.r[0], 0x7F, 16);\
     memset(&pat.g[0], 0x7F, 16);\
     memset(&pat.b[0], 0x00, 16);\
-    memset(&pat.r[16],0x30, 16);\
-    memset(&pat.g[16],0x30, 16);\
-    memset(&pat.b[16],0x30, 16);\
-    pat.ani = 0x1806;\
+    memset(&pat.r[16], 0, 16);\
+    memset(&pat.g[16], 0, 16);\
+    memset(&pat.b[16], 0, 16);\
+    pat.ani = 0x1006;\
     PatApply();\
     while(1)\
     {\
@@ -321,14 +321,38 @@ void netfunc(void* __dummy_arg__)
     
     format[0] = 0xF00FCACE; //invalidate
     
+    //format[0] = 1;
+    //format[1] = 1;
+    
+    int dbgo = 0;
+    
     Handle prochand = 0;
     Handle dmahand = 0;
     u8 dmaconf[0x18];
     memset(dmaconf, 0, sizeof(dmaconf));
     dmaconf[0] = -1; //don't care
+    //dmaconf[2] = 4;
+    
+    //screenInit();
     
     PatPulse(0x7F007F);
     threadrunning = 1;
+    
+    do
+    {
+        k->packetid = 2; //MODE
+        k->size = 4 * 4;
+        
+        u32* kdata = (u32*)k->data;
+        
+        kdata[0] = 1;
+        kdata[1] = 240 * 3;
+        kdata[2] = 1;
+        kdata[3] = 240 * 3;
+        soc->wribuf();
+    }
+    while(0);
+    
     while(threadrunning)
     {
         if(soc->avail())
@@ -377,6 +401,7 @@ void netfunc(void* __dummy_arg__)
         
         if(!soc) break;
         
+        
         if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
         {
             //test for changed framebuffers
@@ -385,13 +410,9 @@ void netfunc(void* __dummy_arg__)
                 capin.screencapture[0].format != format[0]\
                 ||\
                 capin.screencapture[1].format != format[1]\
-                ||\
-                (u8*)capin.screencapture[0].framebuf0_vaddr != fbuf[0]\
-                ||\
-                (u8*)capin.screencapture[1].framebuf0_vaddr != fbuf[1]\
             )
             {
-                PatStay(0xFF7F7F);
+                PatStay(0xFFFF00);
                 
                 fbuf[0] = (u8*)capin.screencapture[0].framebuf0_vaddr;
                 fbuf[1] = (u8*)capin.screencapture[1].framebuf0_vaddr;
@@ -427,6 +448,7 @@ void netfunc(void* __dummy_arg__)
                     svcCloseHandle(prochand);
                     prochand = 0;
                 }
+                
                 
                 //test for VRAM
                 if\
@@ -499,7 +521,8 @@ void netfunc(void* __dummy_arg__)
                     svcStopDma(dmahand);
                     svcCloseHandle(dmahand);
                     dmahand = 0;
-                    GSPGPU_FlushDataCache(screenbuf, siz);
+                    //GSPGPU_FlushDataCache(screenbuf, siz);
+                    svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf, capin.screencapture[0].framebuf_widthbytesize * 400);
                 }
                 if(++offs[0] == limit[0]) offs[0] = 0;                
                 
@@ -525,10 +548,22 @@ void netfunc(void* __dummy_arg__)
                 }
                 //k->size += 4;
                 
-                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
+                //svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
+                //svcFlushProcessDataCache(prochand ? prochand : 0xFFFF8001, capin.screencapture[0].framebuf0_vaddr, capin.screencapture[0].framebuf_widthbytesize * 400);
+                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
+                //screenDMA(&dmahand, screenbuf, 0x600000 + fboffs, siz, dmaconf);
+                //screenDMA(&dmahand, screenbuf, dbgo, siz, dmaconf);
                 
                 if(k->size) soc->wribuf();
+                /*
+                k->packetid = 0xFF;
+                k->size = 4;
+                *(u32*)k->data = dbgo;
+                soc->wribuf();
                 
+                dbgo += 240 * 3;
+                if(dbgo >= 0x600000) dbgo = 0;
+                */
             }
             
             /*
@@ -581,6 +616,7 @@ void netfunc(void* __dummy_arg__)
     }
     
     if(prochand) svcCloseHandle(prochand);
+    //screenExit();
     
     threadrunning = 0;
 }
