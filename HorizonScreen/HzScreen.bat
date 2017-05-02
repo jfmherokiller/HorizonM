@@ -1,1 +1,1 @@
-out\PC\HorizonScreen-PC.exe %*
+@out\PC\HorizonScreen-PC.exe %*

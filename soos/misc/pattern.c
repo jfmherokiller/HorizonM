@@ -1,5 +1,7 @@
 #include "pattern.h"
+#include "../service/mcu.h"
 
+#include <string.h>
 
 
 RGBLedPattern pat;

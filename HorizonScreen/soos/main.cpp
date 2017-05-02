@@ -31,6 +31,7 @@ typedef struct pollfd WSAPOLLFD;
 #include "inet_pton.h"
 
 #include "tga/targa.h"
+#include <turbojpeg.h>
 //#include "lz4/lz4.h"
 }
 
@@ -55,8 +56,11 @@ u32 fpstick = 0;
 int currwrite = 0;
 int oldwrite = 0;
 
+int dbg = 0;
+
 #define errfail(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, errno, strerror(errno)); goto killswitch; }
 #define errtga(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, res, tga_error(res)); goto killswitch; }
+#define errjpeg() { printf("JPEG fail (line #%03i): %s\n", __LINE__, tjGetErrorStr()); goto killswitch; }
 
 
 int pollsock(SOCKET sock, int wat, int timeout = 0)
@@ -271,7 +275,7 @@ u32* pdata = 0;
 
 
 u8 sbuf[256 * 400 * 4 * 2];
-//u8 mehbuf[256 * 400 * 4 * 2];
+u8 decbuf[256 * 400 * 4];
 int srcfmt[2] = {3, 3};
 int stride[2] = {480, 480};
 int bsiz[2] = {2, 2};
@@ -279,6 +283,8 @@ int ret = 0;
 
 tga_image tga;
 tga_result res;
+
+tjhandle jdec = nullptr;
 
 
 int main(int argc, char** argv)
@@ -308,6 +314,9 @@ int main(int argc, char** argv)
     }
     
 #endif
+    
+    jdec = tjInitDecompress();
+    if(!jdec) errjpeg();
     
     sao.sin_family = AF_INET;
     sao.sin_port = htons(port);
@@ -392,9 +401,11 @@ int main(int argc, char** argv)
             
             case 3:
             {
-                tga.image_data = sbuf;
+                tga.image_data = decbuf;
                 res = tga_read_from_FILE(&tga, p->data);
                 if(res) errtga(read_from_FILE);
+                
+                memcpy(sbuf + (tga.origin_y * stride[0]), decbuf, tga.height * stride[0]);
                 
                 if(!tga.origin_y)
                 {
@@ -403,6 +414,26 @@ int main(int argc, char** argv)
                     fpstick = SDL_GetTicks();
                     if(currwrite == FPSNO) currwrite = 0;
                 }
+                break;
+            }
+            
+            case 4:
+            {
+                int iw = 240;
+                int ih = 1;
+                int sus = 0;
+                
+                tjDecompressHeader2(jdec, &p->data[8], p->size - 8, &iw, &ih, &sus);
+                tjDecompress2(jdec, &p->data[8], p->size - 8, sbuf + (*(u16*)&p->data[0] * stride[0]), iw, 0, ih, (srcfmt[0] & 1) ? TJPF_RGB : TJPF_RGBA, TJFLAG_FASTUPSAMPLE | TJFLAG_NOREALLOC | TJFLAG_FASTDCT);
+                
+                if(!*(u16*)&p->data[0])
+                {
+                    u32 prev = SDL_GetTicks() - fpstick;
+                    fpsticks[currwrite++] = prev;
+                    fpstick = SDL_GetTicks();
+                    if(currwrite == FPSNO) currwrite = 0;
+                }
+                
                 break;
             }
             

@@ -38,8 +38,10 @@ extern "C"
 #include "miscdef.h"
 #include "service/mcu.h"
 #include "misc/pattern.h"
+
 #include "tga/targa.h"
-//#include "lz4/lz4.h"
+#include "lz4/lz4.h"
+#include <turbojpeg.h>
 }
 
 #include <exception>
@@ -56,7 +58,7 @@ extern "C"
     memset(&pat.r[16],0x30, 16);\
     memset(&pat.g[16],0x30, 16);\
     memset(&pat.b[16],0x30, 16);\
-    pat.ani = 0x0806;\
+    pat.ani = 0x1806;\
     PatApply();\
     while(1)\
     {\
@@ -285,6 +287,7 @@ static u32 offs[2] = {0, 0};
 static u32 limit[2] = {1, 1};
 static u32 stride[2] = {80, 80};
 static u32 format[2] = {0xF00FCACE, 0xF00FCACE};
+static u8* fbuf[2] = {0, 0};
 
 static int sock = 0;
 
@@ -300,13 +303,17 @@ static vu32 threadrunning = 0;
 
 static u32* screenbuf = nullptr;
 
+static int imgq = 60;
 static tga_image img;
+static tjhandle jencode = nullptr;
+
 
 void netfunc(void* __dummy_arg__)
 {
     u32 siz = 0x80;
     
-    if(!isold) osSetSpeedupEnable(1);
+    if(isold);// screenbuf = (u32*)k->data;
+    else osSetSpeedupEnable(1);
     
     k = soc->pack(); //Just In Case (tm)
     
@@ -314,7 +321,12 @@ void netfunc(void* __dummy_arg__)
     
     format[0] = 0xF00FCACE; //invalidate
     
-
+    Handle prochand = 0;
+    Handle dmahand = 0;
+    u8 dmaconf[0x18];
+    memset(dmaconf, 0, sizeof(dmaconf));
+    dmaconf[0] = -1; //don't care
+    
     PatPulse(0x7F007F);
     threadrunning = 1;
     while(threadrunning)
@@ -367,13 +379,22 @@ void netfunc(void* __dummy_arg__)
         
         if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
         {
+            //test for changed framebuffers
             if\
             (\
                 capin.screencapture[0].format != format[0]\
                 ||\
                 capin.screencapture[1].format != format[1]\
+                ||\
+                (u8*)capin.screencapture[0].framebuf0_vaddr != fbuf[0]\
+                ||\
+                (u8*)capin.screencapture[1].framebuf0_vaddr != fbuf[1]\
             )
             {
+                PatStay(0xFF7F7F);
+                
+                fbuf[0] = (u8*)capin.screencapture[0].framebuf0_vaddr;
+                fbuf[1] = (u8*)capin.screencapture[1].framebuf0_vaddr;
                 format[0] = capin.screencapture[0].format;
                 format[1] = capin.screencapture[1].format;
                 
@@ -392,16 +413,71 @@ void netfunc(void* __dummy_arg__)
                 k->size = sizeof(capin);
                 *(GSPGPU_CaptureInfo*)k->data = capin;
                 soc->wribuf();
+                
+                
+                if(dmahand)
+                {
+                    svcStopDma(dmahand);
+                    svcCloseHandle(dmahand);
+                    dmahand = 0;
+                }
+                
+                if(prochand)
+                {
+                    svcCloseHandle(prochand);
+                    prochand = 0;
+                }
+                
+                //test for VRAM
+                if\
+                (\
+                    (u32)capin.screencapture[0].framebuf0_vaddr >= 0x1F000000\
+                    &&\
+                    (u32)capin.screencapture[0].framebuf0_vaddr <  0x1F600000\
+                )
+                {
+                    //nothing to do?
+                }
+                else //use APT fuckery, auto-assume application as all retail applets use VRAM framebuffers
+                {
+                    memset(&pat.r[0], 0xFF, 16);
+                    memset(&pat.r[16], 0, 16);
+                    memset(&pat.g[0], 0, 16);
+                    memset(&pat.g[16], 0xFF, 16);
+                    memset(&pat.b[0], 0, 32);
+                    pat.ani = 0x2004;
+                    PatApply();
+                    
+                    u64 progid = -1ULL;
+                    u32 procid = -1U;
+                    bool loaded = false;
+                    
+                    while(1)
+                    {
+                        loaded = false;
+                        while(1)
+                        {
+                            if(APT_GetAppletInfo((NS_APPID)0x300, &progid, nullptr, &loaded, nullptr, nullptr) < 0) break;
+                            if(loaded) break;
+                            
+                            svcSleepThread(15e6);
+                        }
+                        
+                        if(!loaded) break;
+                        
+                        if(NS_LaunchTitle(progid, 0, &procid) >= 0) break;
+                    }
+                    
+                    if(loaded) svcOpenProcess(&prochand, procid);
+                    else format[0] = 0xF00FCACE; //invalidate
+                }
+                
+                PatStay(0xFF00);
             }
             
-            // yes, I know this indentation is cancer
-            // also, I know I'm a lazy fuck for only allowing VRAM framebuffers
-            //TODO find a way to read from LINEARmemeory without AcquireRights
             if\
             (\
-                (u32)capin.screencapture[0].framebuf0_vaddr >= 0x1F000000\
-                 &&\
-                (u32)capin.screencapture[0].framebuf0_vaddr <  0x1F600000\
+                format[0] != 0xF00FCACE\
             )
             {
                 siz = (capin.screencapture[0].framebuf_widthbytesize * stride[0]);
@@ -414,36 +490,45 @@ void netfunc(void* __dummy_arg__)
                 if((format[0] & 7) == 2) bits = 17;
                 if((format[0] & 7) == 4) bits = 18;
                 
-                k->packetid = 3; //DATA
                 k->size = 0;
                 
-                memcpy(screenbuf, ((u8*)capin.screencapture[0].framebuf0_vaddr) + fboffs, siz);
+                //memcpy(screenbuf, ((u8*)capin.screencapture[0].framebuf0_vaddr) + fboffs, siz);
                 
+                if(dmahand)
+                {
+                    svcStopDma(dmahand);
+                    svcCloseHandle(dmahand);
+                    dmahand = 0;
+                    GSPGPU_FlushDataCache(screenbuf, siz);
+                }
+                if(++offs[0] == limit[0]) offs[0] = 0;                
                 
                 int imgsize = 0;
                 
-                init_tga_image(&img, (u8*)screenbuf, scrw, stride[0], bits);
-                img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
-                img.origin_y = offs[0] * stride[0];
-                tga_write_to_FILE(k->data, &img, &imgsize);
-                
-                k->size = imgsize;
-                
-                if(++offs[0] == limit[0]) offs[0] = 0;
+                if((format[0] & 7) >> 1 || !imgq)
+                {
+                    init_tga_image(&img, (u8*)screenbuf, scrw, stride[0], bits);
+                    img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
+                    img.origin_y = offs[0] * stride[0];
+                    tga_write_to_FILE(k->data, &img, &imgsize);
+                    
+                    k->packetid = 3; //DATA (Targa)
+                    k->size = imgsize;
+                }
+                else
+                {
+                    *(u16*)&k->data[0] = stride[0] * offs[0];
+                    u8* dstptr = &k->data[8];
+                    if(!tjCompress2(jencode, (u8*)screenbuf, scrw, bsiz * scrw, stride[0], format[0] ? TJPF_RGB : TJPF_RGBX, &dstptr, (u32*)&imgsize, TJSAMP_420, imgq, TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
+                        k->size = imgsize + 8;
+                    k->packetid = 4; //DATA (JPEG)
+                }
                 //k->size += 4;
-                soc->wribuf();
                 
-            }
-            else
-            {
-                k->packetid = 0xFF;
-                k->size = 8;
-                //*(u32*)k->data = fbtop;
-                //*(u32*)&k->data[4] = fbbot;
-                *(u32*)k->data = (u32)capin.screencapture[0].framebuf0_vaddr;
-                *(u32*)&k->data[4] = (u32)capin.screencapture[1].framebuf0_vaddr;
-                soc->wribuf();
-                svcSleepThread(1e9);
+                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
+                
+                if(k->size) soc->wribuf();
+                
             }
             
             /*
@@ -489,12 +574,21 @@ void netfunc(void* __dummy_arg__)
         soc = nullptr;
     }
     
+    if(dmahand)
+    {
+        svcStopDma(dmahand);
+        svcCloseHandle(dmahand);
+    }
+    
+    if(prochand) svcCloseHandle(prochand);
+    
     threadrunning = 0;
 }
 
 int main()
 {
     mcuInit();
+    nsInit();
     
     memset(&pat, 0, sizeof(pat));
     memset(&capin, 0, sizeof(capin));
@@ -524,17 +618,30 @@ int main()
     
     do
     {
-        u32 siz = isold ? 0x40000 : 0x200000;
+        u32 siz = isold ? 0x10000 : 0x200000;
         ret = socInit((u32*)memalign(0x1000, siz), siz);
     }
     while(0);
-    if(ret < 0) hangmacro();
+    if(ret < 0) *(u32*)0x1000F0 = ret;//hangmacro();
+    
+    jencode = tjInitCompress();
+    if(!jencode) *(u32*)0x1000F0 = 0xDEADDEAD;//hangmacro();
     
     gspInit();
     
     //gxInit();
     
-    screenbuf = (u32*)linearAlloc(400 * 256 * 4);
+    if(isold)
+        screenbuf = (u32*)memalign(8, 200 * 240 * 4);
+    else
+        screenbuf = (u32*)memalign(8, 400 * 240 * 4);
+    
+    if(!screenbuf)
+    {
+        makerave();
+        svcSleepThread(2e9);
+        hangmacro();
+    }
     
     
     if((__excno = setjmp(__exc))) goto killswitch;
@@ -546,16 +653,12 @@ int main()
     
     netreset:
     
-    if(checkwifi())
+    if(haznet && errno == EINVAL)
     {
-        if(errno == EINVAL)
-        {
-            errno = 0;
-            PatStay(0xFFFF);
-            while(checkwifi()) yield();
-        }
+        errno = 0;
+        PatStay(0xFFFF);
+        while(checkwifi()) yield();
     }
-    else PatStay(0xFFFF);
     
     if(checkwifi())
     {
@@ -623,16 +726,16 @@ int main()
                 }
                 else
                 {
-                    soc = new bufsoc(cli, isold ? 0x2EE10 : 0xC0000);
+                    soc = new bufsoc(cli, isold ? 0x2F000 : 0x70000);
                     k = soc->pack();
                     
                     if(isold)
                     {
-                        netthread = threadCreate(netfunc, nullptr, 0x400, 8, 0, true);
+                        netthread = threadCreate(netfunc, nullptr, 0x2000, 16, 0, true);
                     }
                     else
                     {
-                        netthread = threadCreate(netfunc, nullptr, 0x4000, 8, 3, true);
+                        netthread = threadCreate(netfunc, nullptr, 0x4000, 16, 3, true);
                     }
                     
                     if(!netthread)
@@ -708,6 +811,8 @@ int main()
     acExit();
     
     PatStay(0);
+    
+    nsExit();
     
     mcuExit();
     
