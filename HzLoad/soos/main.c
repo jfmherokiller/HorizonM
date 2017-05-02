@@ -30,6 +30,10 @@ Result mcuWriteRegister(u8 reg, void* data, u32 size)
 int main()
 {
 #if _HIMEM
+    
+    srvPublishToSubscriber(0x204, 0);
+    srvPublishToSubscriber(0x205, 0);
+    
     while(aptMainLoop())
     {
         svcSleepThread(5e7);
