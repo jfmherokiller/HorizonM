@@ -196,29 +196,26 @@ public:
     
     int errformat(char* c, ...)
     {
-        char* wat = nullptr;
+        packet* p = pack();
+        
         int len = 0;
         
         va_list args;
         va_start(args, c);
-        len = vasprintf(&wat, c, args);
+        len = vsprintf((char*)p->data + 1, c, args);
         va_end(args);
         
         if(len < 0)
         {
-            puts("out of memory");
+            puts("out of memory"); //???
             return -1;
         }
         
-        packet* p = pack();
-        
-        printf("Packet error %i: %s\n", p->packetid, wat);
+        //printf("Packet error %i: %s\n", p->packetid, p->data + 1);
         
         p->data[0] = p->packetid;
         p->packetid = 1;
         p->size = len + 2;
-        strcpy((char*)(p->data + 1), wat);
-        delete wat;
         
         return wribuf();
     }
@@ -287,7 +284,8 @@ static u32 offs[2] = {0, 0};
 static u32 limit[2] = {1, 1};
 static u32 stride[2] = {80, 80};
 static u32 format[2] = {0xF00FCACE, 0xF00FCACE};
-static u8* fbuf[2] = {0, 0};
+
+static u8 cfgblk[0x100];
 
 static int sock = 0;
 
@@ -408,8 +406,8 @@ void netfunc(void* __dummy_arg__)
             {
                 PatStay(0xFFFF00);
                 
-                fbuf[0] = (u8*)capin.screencapture[0].framebuf0_vaddr;
-                fbuf[1] = (u8*)capin.screencapture[1].framebuf0_vaddr;
+                //fbuf[0] = (u8*)capin.screencapture[0].framebuf0_vaddr;
+                //fbuf[1] = (u8*)capin.screencapture[1].framebuf0_vaddr;
                 format[0] = capin.screencapture[0].format;
                 format[1] = capin.screencapture[1].format;
                 
@@ -626,6 +624,7 @@ int main()
     
     memset(&pat, 0, sizeof(pat));
     memset(&capin, 0, sizeof(capin));
+    memset(cfgblk, 0, sizeof(cfgblk));
     
     isold = APPMEMTYPE <= 5;
     
