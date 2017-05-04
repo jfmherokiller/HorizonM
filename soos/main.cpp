@@ -479,7 +479,7 @@ void netfunc(void* __dummy_arg__)
                         if(NS_LaunchTitle(progid, 0, &procid) >= 0) break;
                     }
                     
-                    if(loaded) svcOpenProcess(&prochand, procid);
+                    if(loaded);// svcOpenProcess(&prochand, procid);
                     else format[0] = 0xF00FCACE; //invalidate
                 }
                 
@@ -539,13 +539,18 @@ void netfunc(void* __dummy_arg__)
                 
                 //svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
                 //svcFlushProcessDataCache(prochand ? prochand : 0xFFFF8001, capin.screencapture[0].framebuf0_vaddr, capin.screencapture[0].framebuf_widthbytesize * 400);
-                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
+                //svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
                 //screenDMA(&dmahand, screenbuf, 0x600000 + fboffs, siz, dmaconf);
                 //screenDMA(&dmahand, screenbuf, dbgo, siz, dmaconf);
                 
                 Handle prochand = 0;
                 if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
-                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
+                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
+                if(prochand)
+                {
+                    svcCloseHandle(prochand);
+                    prochand = 0;
+                }
                 
                 if(k->size) soc->wribuf();
                 /*
@@ -608,7 +613,7 @@ void netfunc(void* __dummy_arg__)
         svcCloseHandle(dmahand);
     }
     
-    if(prochand) svcCloseHandle(prochand);
+    //if(prochand) svcCloseHandle(prochand);
     //screenExit();
     
     threadrunning = 0;
