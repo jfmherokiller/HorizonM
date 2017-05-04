@@ -321,12 +321,7 @@ void netfunc(void* __dummy_arg__)
     
     format[0] = 0xF00FCACE; //invalidate
     
-    //format[0] = 1;
-    //format[1] = 1;
-    
-    int dbgo = 0;
-    
-    Handle prochand = 0;
+    u32 procid = 0;
     Handle dmahand = 0;
     u8 dmaconf[0x18];
     memset(dmaconf, 0, sizeof(dmaconf));
@@ -401,7 +396,6 @@ void netfunc(void* __dummy_arg__)
         
         if(!soc) break;
         
-        
         if(GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
         {
             //test for changed framebuffers
@@ -443,11 +437,7 @@ void netfunc(void* __dummy_arg__)
                     dmahand = 0;
                 }
                 
-                if(prochand)
-                {
-                    svcCloseHandle(prochand);
-                    prochand = 0;
-                }
+                procid = 0;
                 
                 
                 //test for VRAM
@@ -471,7 +461,6 @@ void netfunc(void* __dummy_arg__)
                     PatApply();
                     
                     u64 progid = -1ULL;
-                    u32 procid = -1U;
                     bool loaded = false;
                     
                     while(1)
@@ -553,6 +542,10 @@ void netfunc(void* __dummy_arg__)
                 svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
                 //screenDMA(&dmahand, screenbuf, 0x600000 + fboffs, siz, dmaconf);
                 //screenDMA(&dmahand, screenbuf, dbgo, siz, dmaconf);
+                
+                Handle prochand = 0;
+                if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
+                svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
                 
                 if(k->size) soc->wribuf();
                 /*
