@@ -56,7 +56,8 @@ See other directories for more info about them.
 - anything -> bright yellow - waiting for wifi availability
 - bright yellow -> flashing white and yellow - failed to reinitialize networking (due to a program bug or a failed race condition)
 - anything -> blinking dark yellow - `hangmacro()`, indicates a fatal error that didn't crash the process
-- light blue -> rapid flashing red - failed to create the network thread (out of resources)
+- light blue -> rapid flashing black and red - failed to create the network thread (out of resources)
+- light blue -> rapid flashing white and red - failed to accept new connections because we ran out of memory (memory leak)
 - light blue -> green - network thread started, initializing stuff
 - green && pink blink - connection estabilished with HorizonScreen
 - green -> flashing pink&yellow - disconnected, waiting for cleanup
