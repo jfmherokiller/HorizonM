@@ -131,6 +131,8 @@ public:
     
     ~bufsoc()
     {
+        if(!this) return;
+        close(sock);
         delete[] buf;
     }
     
@@ -402,10 +404,10 @@ int main(int argc, char** argv)
     do
     {
         struct timeval timeout;
-        timeout.tv_sec = 8;
+        timeout.tv_sec = 15;
         timeout.tv_usec = 0;
         
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+        //setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
     }
     while(0);
     
@@ -447,15 +449,12 @@ int main(int argc, char** argv)
     {
         u32* _1 = (u32*)sbuf;
         
-        puts("loading font");
-        
         int i, j, k;
         for(i = 0; i != 0x100; i++)
             for(j = 0; j != 8; j++)
                 for(k = 0; k != 8; k++)
-                    _1[((i >> 4) * 128 * 8) + ((i & 0xF) * 8) + (j * 128) + k] = (ctrufont_bin[(i * 8) + j] & (1 << (7 - k))) ? -1U : 0;
+                    _1[((i >> 4) << 10) + ((i & 0xF) << 3) + (j << 7) + k] = (ctrufont_bin[(i << 3) + j] & (1 << (~k & 7))) ? -1U : 0;
         
-        puts("updating texture");
         SDL_UpdateTexture(font, nullptr, sbuf, 128 * 4);
         SDL_SetTextureBlendMode(font, SDL_BLENDMODE_BLEND);
         
@@ -468,19 +467,33 @@ int main(int argc, char** argv)
     }
     while(0);
     
+    puts("Sending JPEG quality cfgblk");
+    p->packetid = 0x7E; //CFGBLK_IN
+    p->size = 4 + 1;
+    p->data[0] = 3; //JPEG_QUALITY
+    p->data[4] = 60;
+    if(soc->wribuf() <= 0) wsafail(soc->wribuf);
     
+    puts("Sending stream enable cfgblk");
+    p->packetid = 0x7E; //CFGBLK_IN
+    p->size = 4 + 1;
+    p->data[0] = 0; //STREAM_ENABLE
+    p->data[4] = 1 | 2; //SCREEN_TOP | SCREEN_BOTTOM
+    if(soc->wribuf() <= 0) wsafail(soc->wribuf);
+    
+    puts("Setup done");
     
     
     while(PumpEvent())
     {
-        if(!soc->avail()) goto nocoffei;
+        //if(!soc->avail()) goto nocoffei;
         
         ret = soc->readbuf();
         if(ret <= 0) wsafail(soc->readbuf);
         
         switch(p->packetid)
         {
-            case 1: //ERROR
+            case 0x01: //ERROR
                 printf("Disconnected by error (%i): ", p->data[0]);
                 int i;
                 for(i = 1; i != p->size; i++)
@@ -490,7 +503,7 @@ int main(int argc, char** argv)
                 wsafail(slave);
                 break;
                 
-            case 2: //MODESET
+            case 0x02: //MODESET
                 pdata = (u32*)p->data;
                 
                 printf("ModeTOP: %04X (o: %i, bytesize: %i)\n", pdata[0], pdata[0] & 7, pdata[1]);
@@ -518,13 +531,16 @@ int main(int argc, char** argv)
                 img[1] = mksurface(stride[1] / bsiz[1], 320, bsiz[1], srcfmt[1]);
                 break;
             
-            case 3: //DATA_TGA
+            case 0x03: //DATA_TGA
             {
                 tga.image_data = decbuf;
                 res = tga_read_from_FILE(&tga, p->data);
                 if(res) errtga(read_from_FILE);
                 
-                memcpy(sbuf + (tga.origin_y * stride[0]), decbuf, tga.height * stride[0]);
+                u32 offs = tga.origin_y;
+                offs = offs / 400 ? (stride[0] * 400) + (stride[1] * (offs % 400)) : stride[0] * offs;
+                
+                memcpy(sbuf + offs, decbuf, tga.height * stride[tga.origin_y / 400]);
                 
                 if(!tga.origin_y)
                 {
@@ -536,16 +552,19 @@ int main(int argc, char** argv)
                 break;
             }
             
-            case 4: //DATA_JPEG
+            case 0x04: //DATA_JPEG
             {
                 int iw = 240;
                 int ih = 1;
                 int sus = 0;
                 
-                tjDecompressHeader2(jdec, &p->data[8], p->size - 8, &iw, &ih, &sus);
-                tjDecompress2(jdec, &p->data[8], p->size - 8, sbuf + (*(u16*)&p->data[0] * stride[0]), iw, 0, ih, (srcfmt[0] & 1) ? TJPF_RGB : TJPF_RGBA, TJFLAG_FASTUPSAMPLE | TJFLAG_NOREALLOC | TJFLAG_FASTDCT);
+                u32 offs = *(u32*)&p->data[0];
+                offs = offs / 400 ? (stride[0] * 400) + (stride[1] * (offs % 400)) : stride[0] * offs;
                 
-                if(!*(u16*)&p->data[0])
+                tjDecompressHeader2(jdec, &p->data[8], p->size - 8, &iw, &ih, &sus);
+                tjDecompress2(jdec, &p->data[8], p->size - 8, sbuf + offs, iw, 0, ih, (srcfmt[*(u32*)&p->data[0] / 400] & 1) ? TJPF_RGB : TJPF_RGBA, TJFLAG_FASTUPSAMPLE | TJFLAG_NOREALLOC | TJFLAG_FASTDCT);
+                
+                if(!*(u32*)&p->data[0])
                 {
                     u32 prev = SDL_GetTicks() - fpstick;
                     fpsticks[currwrite++] = prev;
@@ -596,7 +615,7 @@ int main(int argc, char** argv)
         if(img[1])
         {
             SDL_LockSurface(img[1]);
-            memcpy(img[1]->pixels, sbuf + (256 * 400 * 4), stride[1] * 320);
+            memcpy(img[1]->pixels, sbuf + (stride[0] * 400), stride[1] * 320);
             SDL_UnlockSurface(img[1]);
             
             SDL_DestroyTexture(tex[1]);
