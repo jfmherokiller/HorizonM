@@ -154,9 +154,9 @@ $(OUTPUT)-PC.$(POSTFIX)	:	$(OFILES)
 #---------------------------------------------------------------------------------
 	@echo $(notdir $<)
 #ifeq ($(OS),Windows_NT)
-	bin2c $< $(@).c_tmp `(echo $(<F) | tr . _)` && cat $(@).c_tmp | sed 's/static //g' >$(@).c && $(CC) $(CFLAGS) -c $(@).c -o $(@)
+#	bin2c $< $(@).c_tmp `(echo $(<F) | tr . _)` && cat $(@).c_tmp | sed 's/static //g' >$(@).c && $(CC) $(CFLAGS) -c $(@).c -o $(@)
 #else
-#	@bin2s $< | $(AS) -o $(@)
+	bin2c -o $(@).c_tmp -n `(echo $(<F) | tr . _)` $< && cat $(@).c_tmp | sed 's/static //g' >$(@).c && $(CC) $(CFLAGS) -c $(@).c -o $(@)
 #endif
 #	@echo "extern const u8" `(echo $(<F) | sed -e 's/^\([0-9]\)/_\1/' | tr . _)`"_end[];" > `(echo $(<F) | tr . _)`.h
 	@echo "extern const u8" `(echo $(<F) | sed -e 's/^\([0-9]\)/_\1/' | tr . _)`"[];" >> `(echo $(<F) | tr . _)`.h
