@@ -1,4 +1,5 @@
 language: cpp
+compiler: clang
 os:
   - linux
   - osx
@@ -6,8 +7,6 @@ os:
 addons:
   apt:
     packages:
-    - gcc
-    - g++
     - cmake
     - sdl2
     - libjpeg-turbo8-dev
