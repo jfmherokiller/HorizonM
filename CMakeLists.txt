@@ -35,11 +35,8 @@ endif()
 add_dependencies(HorizonScreen ctrufont)
 target_link_libraries(HorizonScreen ${LIBS})
 if(APPLE)
-install (TARGETS HorizonScreen
-        BUNDLE DESTINATION .
-        RUNTIME DESTINATION bin
-        )
+install (TARGETS HorizonScreen BUNDLE DESTINATION ${CMAKE_INSTALL_PREFIX} RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 elseif(WIN32)
 elseif(UNIX)
-    install (TARGETS HorizonScreen)
+    install (TARGETS HorizonScreen RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 endif()
