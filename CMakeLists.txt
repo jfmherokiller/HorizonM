@@ -34,17 +34,15 @@ endif()
 
 add_dependencies(HorizonScreen ctrufont)
 target_link_libraries(HorizonScreen ${LIBS})
-if(APPLE)
-install (TARGETS HorizonScreen BUNDLE DESTINATION ${CMAKE_INSTALL_PREFIX} RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
-elseif(WIN32)
-elseif(UNIX)
-    install (TARGETS HorizonScreen RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
-    include(GetPrerequisites)
-    get_prerequisites(${CMAKE_INSTALL_PREFIX}/bin/HorizonScreen DEPENDENCIES 0 0 "" "")
 
-    foreach(DEPENDENCY_FILE ${DEPENDENCIES})
-        gp_resolve_item("${MY_BINARY_LOCATION}" "${DEPENDENCY_FILE}" "" ""
-                resolved_file)
-        message("resolved_file='${resolved_file}'")
-    endforeach()
-endif()
+SET(APPS "\${CMAKE_INSTALL_PREFIX}/bin/HorizonScreen")
+set(YOUR_LIBRARY_DIRS "/usr/local/lib;/opt;/opt/sdl2/lib")
+# Install the application
+INSTALL(TARGETS HorizonScreen
+        BUNDLE DESTINATION . COMPONENT Runtime
+        RUNTIME DESTINATION bin COMPONENT Runtime
+        )
+install(CODE "
+  include(BundleUtilities)
+  fixup_bundle(\"${APPS}\" \"\" \"${YOUR_LIBRARY_DIRS}\")
+  " COMPONENT Runtime)
