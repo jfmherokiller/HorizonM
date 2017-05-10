@@ -391,7 +391,7 @@ int main(int argc, char *argv[]) {
     p->packetid = 0x7E; //CFGBLK_IN
     p->size = 4 + 1;
     p->data[0] = 3; //JPEG_QUALITY
-    p->data[4] = 60;
+    p->data[4] = 40;
     if (soc->write_buf() <= 0) wsafail (soc->write_buf);
 
     puts("Sending stream enable cfgblk");
