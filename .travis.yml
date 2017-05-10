@@ -9,8 +9,8 @@ addons:
     packages:
     - cmake
     - libjpeg-turbo8-dev
-before_install: travis-deps.sh
-script: travis-build.sh
+before_install: ./travis-deps.sh
+script: ./travis-build.sh
 cache:
     apt: true
     ccache: true
