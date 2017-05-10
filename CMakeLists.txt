@@ -35,14 +35,6 @@ endif()
 add_dependencies(HorizonScreen ctrufont)
 target_link_libraries(HorizonScreen ${LIBS})
 
-SET(APPS "\${CMAKE_INSTALL_PREFIX}/bin/HorizonScreen")
-set(YOUR_LIBRARY_DIRS "/usr/local/lib;/opt;/opt/sdl2/lib")
-# Install the application
-INSTALL(TARGETS HorizonScreen
-        BUNDLE DESTINATION . COMPONENT Runtime
-        RUNTIME DESTINATION bin COMPONENT Runtime
-        )
-install(CODE "
-  include(BundleUtilities)
-  fixup_bundle(\"${APPS}\" \"\" \"${YOUR_LIBRARY_DIRS}\")
-  " COMPONENT Runtime)
+
+SET(CPACK_GENERATOR "ZIP")
+INCLUDE(CPack)
