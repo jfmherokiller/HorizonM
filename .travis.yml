@@ -8,9 +8,11 @@ addons:
   apt:
     packages:
     - cmake
-    - sdl2
     - libjpeg-turbo8-dev
 before_install: travis-deps.sh
-
+script: travis-build.sh
 cache:
     apt: true
+    ccache: true
+    directories:
+    - $HOME/deps
