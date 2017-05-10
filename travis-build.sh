@@ -9,4 +9,3 @@ if [[ "$TRAVIS_OS_NAME" == "linux" ]]
 then
 export LD_LIBRARY_PATH=$HOME/deps/lib:$LD_LIBRARY_PATH
 fi
-
