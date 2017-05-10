@@ -8,7 +8,8 @@ fi
 
 if [[ "$TRAVIS_OS_NAME" == "linux" ]]
 then
-    if [ -z `ls /opt/sdl2/*` ]; then
+    if [[ ! -f "/opt/sdl2/lib/libSDL2.so" ]]
+    then
         mkdir -p /opt/sdl2
         wget https://www.libsdl.org/release/SDL2-2.0.5.tar.gz
         tar xf SDL2-2.0.5.tar.gz

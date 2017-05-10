@@ -4,7 +4,7 @@
 #include "compat/hid.h"
 
 //#ifdef _WIN32
-#include <SDL2/SDL.h>
+#include <SDL.h>
 //#else
 //#include <SDL.h>
 //#endif
