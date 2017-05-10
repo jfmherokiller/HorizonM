@@ -7,7 +7,7 @@ export PATH=$PATH:/usr/local/opt/ccache/libexec
 fi
 if [[ "$TRAVIS_OS_NAME" == "linux" ]]
 then
-export LD_LIBRARY_PATH=$HOME/deps/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$HOME/opt/sdl2/lib:$LD_LIBRARY_PATH
 fi
 mkdir -p $HOME/built
 mkdir build
