@@ -19,7 +19,7 @@ set(SOURCES soos/main.cpp
         soos/utils.c)
 
 
-string(TIMESTAMP DT "%Y%m%d")
+string(TIMESTAMP DT "%Y,%m,%d")
 add_definitions(-DBUILDTIME="${DT}")
 if(APPLE)
     add_executable(HorizonScreen MACOSX_BUNDLE ${SOURCES})
