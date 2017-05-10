@@ -40,7 +40,7 @@ elseif(WIN32)
 elseif(UNIX)
     install (TARGETS HorizonScreen RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 
-    get_prerequisites(${MY_BINARY_LOCATION} DEPENDENCIES 0 0 "" "")
+    get_prerequisites(${CMAKE_INSTALL_PREFIX}/bin/HorizonScreen DEPENDENCIES 0 0 "" "")
 
     foreach(DEPENDENCY_FILE ${DEPENDENCIES})
         gp_resolve_item("${MY_BINARY_LOCATION}" "${DEPENDENCY_FILE}" "" ""
