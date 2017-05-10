@@ -34,3 +34,12 @@ endif()
 
 add_dependencies(HorizonScreen ctrufont)
 target_link_libraries(HorizonScreen ${LIBS})
+if(APPLE)
+install (TARGETS HorizonScreen
+        BUNDLE DESTINATION .
+        RUNTIME DESTINATION bin
+        )
+elseif(WIN32)
+elseif(UNIX)
+    install (TARGETS HorizonScreen)
+endif()
