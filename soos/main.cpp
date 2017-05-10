@@ -1,25 +1,9 @@
-#include <3ds.h>
-
-/*
-    HorizonM - utility background process for the Horizon operating system
-    Copyright (C) 2017 MarcusD (https://github.com/MarcuzD)
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
+#define _WIN32_WINNT 0x0501
+#include <platform.hpp>
 
 extern "C"
 {
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -28,73 +12,95 @@ extern "C"
 #include <setjmp.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if __APPLE__
+#include <malloc/malloc.h>
+#else
 #include <malloc.h>
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <fcntl.h>
-#include <sys/iosupport.h>
-
-#include <poll.h>
+#ifndef WIN32
 #include <arpa/inet.h>
+#include <netdb.h>
+typedef int SOCKET;
+typedef struct pollfd WSAPOLLFD;
+#endif
+#include <poll.h>
 
-#include "miscdef.h"
-//#include "service/screen.h"
-#include "service/mcu.h"
-#include "misc/pattern.h"
+#include "inet_pton.h"
 
 #include "tga/targa.h"
 #include <turbojpeg.h>
+//#include "lz4/lz4.h"
+
+#include "ctrufont_bin.h"
 }
+
+#ifdef WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef int socklen_t;
+#endif
 
 #include <exception>
 
-#include "utils.hpp"
+using ::abs;
+using namespace std;
 
+#define FPSNO 5
 
+float fps = 0.0F;
+u32 fpsticks[FPSNO];
+u32 fpstick = 0;
+int currwrite = 0;
+int oldwrite = 0;
 
-#define yield() svcSleepThread(1e8)
+char printbuf[0x100];
 
-#define hangmacro()\
+int dbg = 0;
+
+#define errfail(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, errno, strerror(errno)); goto killswitch; }
+#define errtga(wut) { printf(#wut " fail (line #%03i): (%i) %s\n", __LINE__, res, tga_error(res)); goto killswitch; }
+#define errjpeg() { printf("JPEG fail (line #%03i): %s\n", __LINE__, tjGetErrorStr()); goto killswitch; }
+
+#ifdef WIN32
+#define wsafail(func)\
 {\
-    memset(&pat.r[0], 0x7F, 16);\
-    memset(&pat.g[0], 0x7F, 16);\
-    memset(&pat.b[0], 0x00, 16);\
-    memset(&pat.r[16], 0, 16);\
-    memset(&pat.g[16], 0, 16);\
-    memset(&pat.b[16], 0, 16);\
-    pat.ani = 0x1006;\
-    PatApply();\
-    while(1)\
-    {\
-        hidScanInput();\
-        if(hidKeysHeld() == (KEY_SELECT | KEY_START))\
-        {\
-            goto killswitch;\
-        }\
-        yield();\
-    }\
+    wchar_t *s = NULL;\
+    FormatMessageW\
+    (\
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,\
+        NULL, WSAGetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&s, 0, NULL\
+    );\
+    printf(#func " fail (line #%03i): (%i) %S\n", __LINE__, WSAGetLastError(), s);\
+    LocalFree(s);\
+    goto killswitch;\
 }
+#else
+#define wsafail errfail
+#endif
 
-static int haznet = 0;
-int checkwifi()
+int pollsock(SOCKET sock, int wat, int timeout = 0)
 {
-    haznet = 0;
-    u32 wifi = 0;
-    hidScanInput();
-    if(hidKeysHeld() == (KEY_SELECT | KEY_START)) return 0;
-    if(ACU_GetWifiStatus(&wifi) >= 0 && wifi) haznet = 1;
-    return haznet;
-}
-
-
-int pollsock(int sock, int wat, int timeout = 0)
-{
-    struct pollfd pd;
+#ifdef WIN32
+    fd_set fd;
+    fd.fd_count = 1;
+    fd.fd_array[0] = sock;
+    TIMEVAL t;
+    t.tv_sec = timeout / 1000;
+    t.tv_usec = (timeout % 1000) * 1e6;
+    int ret = select(1, (wat & POLLIN) ? &fd : nullptr , nullptr, (wat & POLLERR) ? &fd : nullptr, &t);
+    if(ret == SOCKET_ERROR) return (wat & POLLERR) == POLLERR;
+    return ret ? wat : 0;
+#else
+    WSAPOLLFD pd;
     pd.fd = sock;
     pd.events = wat;
     
     if(poll(&pd, 1, timeout) == 1)
         return pd.revents & wat;
+#endif
     return 0;
 }
 
@@ -102,19 +108,19 @@ class bufsoc
 {
 public:
     
-    typedef struct
+    struct packet
     {
         u32 packetid : 8;
         u32 size : 24;
         u8 data[0];
-    } packet;
+    };
     
-    int sock;
+    SOCKET sock;
     u8* buf;
     int bufsize;
     int recvsize;
     
-    bufsoc(int sock, int bufsize)
+    bufsoc(SOCKET sock, int bufsize = 1024 * 1024)
     {
         this->bufsize = bufsize;
         buf = new u8[bufsize];
@@ -138,7 +144,7 @@ public:
     int readbuf(int flags = 0)
     {
         u32 hdr = 0;
-        int ret = recv(sock, &hdr, 4, flags);
+        int ret = recv(sock, (char*)&hdr, 4, flags);
         if(ret < 0) return -errno;
         if(ret < 4) return -1;
         *(u32*)buf = hdr;
@@ -149,7 +155,7 @@ public:
         int offs = 4;
         while(mustwri)
         {
-            ret = recv(sock, buf + offs , mustwri, flags);
+            ret = recv(sock, (char*)(buf + offs), mustwri, flags);
             if(ret <= 0) return -errno;
             mustwri -= ret;
             offs += ret;
@@ -159,34 +165,14 @@ public:
         return offs;
     }
     
-    int wribuf_old(int flags = 0)
-    {
-        int mustwri = pack()->size + 4;
-        int offs = 0;
-        int ret = 0;
-        while(mustwri)
-        {
-            ret = send(sock, buf + offs , mustwri, flags);
-            if(ret < 0) return -errno;
-            mustwri -= ret;
-            offs += ret;
-        }
-        
-        return offs;
-    }
-    
     int wribuf(int flags = 0)
     {
         int mustwri = pack()->size + 4;
         int offs = 0;
         int ret = 0;
-        
         while(mustwri)
         {
-            if(mustwri >> 12)
-                ret = send(sock, buf + offs , 0x1000, flags);
-            else
-                ret = send(sock, buf + offs , mustwri, flags);
+            ret = send(sock, (char*)(buf + offs) , mustwri, flags);
             if(ret < 0) return -errno;
             mustwri -= ret;
             offs += ret;
@@ -202,710 +188,510 @@ public:
     
     int errformat(char* c, ...)
     {
-        packet* p = pack();
-        
         int len = 0;
+        
+        packet* p = pack();
         
         va_list args;
         va_start(args, c);
-        len = vsprintf((char*)p->data + 1, c, args);
+        len = vsnprintf((char*)(p->data + 1), 256, c, args);
         va_end(args);
         
         if(len < 0)
         {
-            puts("out of memory"); //???
+            puts("wat");
             return -1;
         }
         
-        //printf("Packet error %i: %s\n", p->packetid, p->data + 1);
+        printf("Packet error %i: %s\n", p->packetid, (char*)(p->data + 1));
         
         p->data[0] = p->packetid;
         p->packetid = 1;
-        p->size = len + 2;
+        p->size = (len * sizeof(char)) + 2;
         
         return wribuf();
     }
 };
 
-static jmp_buf __exc;
-static int  __excno;
 
-void CPPCrashHandler()
+int PumpEvent()
 {
-    puts("\e[0m\n\n- The application has crashed\n\n");
+    SDL_Event evt;
     
-    try
+    int i;
+    int j;
+    
+    while(SDL_PollEvent(&evt))
     {
-        throw;
-    }
-    catch(std::exception &e)
-    {
-        printf("std::exception: %s\n", e.what());
-    }
-    catch(Result res)
-    {
-        printf("Result: %08X\n", res);
-        //NNERR(res);
-    }
-    catch(int e)
-    {
-        printf("(int) %i\n", e);
-    }
-    catch(...)
-    {
-        puts("<unknown exception>");
+        switch(evt.type)
+        {
+            case SDL_QUIT:
+            case SDL_APP_TERMINATING:
+                return 0;
+        }
     }
     
-    puts("\n");
+    return 1;
+}
+
+SDL_Surface* mksurface(int width, int height, int bsiz, int pixfmt)
+{
+    int rm, gm, bm, am, bs;
     
-    PatStay(0xFFFFFF);
-    PatPulse(0xFF);
+    switch(pixfmt & 7)
+    {
+        case 0:
+            rm = 0x000000FF;
+            gm = 0x0000FF00;
+            bm = 0x00FF0000;
+            am = 0xFF000000;
+            bs = 4;
+            break;
+        case 2:
+            rm = 0xF800;
+            gm = 0x07E0;
+            bm = 0x001F;
+            am = 0;
+            bs = 2;
+            break;
+        case 3:
+            rm = 0xF800;
+            gm = 0x07C0;
+            bm = 0x003E;
+            am = 0x0001;
+            bs = 2;
+            break;
+        case 4:
+            rm = 0x000F;
+            gm = 0x00F0;
+            bm = 0x0F00;
+            am = 0xF000;
+            bs = 2;
+            break;
+        default:
+            rm = 0xFF0000;
+            gm = 0x00FF00;
+            bm = 0x0000FF;
+            am = 0;
+            bs = 3;
+            break;
+    }
     
-    svcSleepThread(1e9);
+    printf("Surface: %ix%i %ibpp (%08X %08X %08X %08X)\n", width, height, bs << 3, rm, gm, bm, am);
+    SDL_Surface* surf = SDL_CreateRGBSurface(0, width, height, bs << 3, rm, gm, bm, am);
+    if(!surf)
+    {
+        printf("No surface! %s :(\n", SDL_GetError());
+    }
     
-    hangmacro();
-    
-    killswitch:
-    longjmp(__exc, 1);
+    return surf;
 }
 
 
-extern "C" u32 __get_bytes_per_pixel(GSPGPU_FramebufferFormats format);
+SDL_Window* win = 0;
+SDL_Renderer* rendertop = 0;
+SDL_Texture* tex[2] = {0, 0};
+SDL_Surface* img[2] = {0, 0};
 
-const int port = 6464;
-
-static u32 kDown = 0;
-static u32 kHeld = 0;
-static u32 kUp = 0;
-
-static GSPGPU_CaptureInfo capin;
-
-static int isold = 1;
-
-static Result ret = 0;
-static int cx = 0;
-static int cy = 0;
-
-static u32 offs[2] = {0, 0};
-static u32 limit[2] = {1, 1};
-static u32 stride[2] = {80, 80};
-static u32 format[2] = {0xF00FCACE, 0xF00FCACE};
-
-static u8 cfgblk[0x100];
-
-static int sock = 0;
-
-static struct sockaddr_in sai;
-static socklen_t sizeof_sai = sizeof(sai);
-
-static bufsoc* soc = nullptr;
-
-static bufsoc::packet* k = nullptr;
-
-static Thread netthread = 0;
-static vu32 threadrunning = 0;
-
-static u32* screenbuf = nullptr;
-
-static tga_image img;
-static tjhandle jencode = nullptr;
+SDL_Texture* font = 0;
 
 
-void netfunc(void* __dummy_arg__)
+void drawtext(char* wat, int sx, int sy, int color = 0, int scx = 1, int scy = 1)
 {
-    u32 siz = 0x80;
-    u32 bsiz = 1;
-    u32 scrw = 1;
-    u32 bits = 8;
+    if(color >> 24) SDL_SetTextureAlphaMod(font, color >> 24); else SDL_SetTextureAlphaMod(font, 0xFF);
+    SDL_SetTextureColorMod(font, (color & 0xFF), (color >> 8) & 0xFF, (color >> 16) & 0xFF);
     
-    int scr = 0;
+    SDL_Rect dest;
+    dest.w = scx * 8;
+    dest.h = scy * 8;
     
-    if(isold);// screenbuf = (u32*)k->data;
-    else osSetSpeedupEnable(1);
+    SDL_Rect src;
+    src.w = 8;
+    src.h = 8;
     
-    k = soc->pack(); //Just In Case (tm)
+    //int i = 0;
+    int x = sx;
+    int y = sy;
+    char c;
     
-    PatStay(0xFF00);
-    
-    format[0] = 0xF00FCACE; //invalidate
-    
-    u32 procid = 0;
-    Handle dmahand = 0;
-    u8 dmaconf[0x18];
-    memset(dmaconf, 0, sizeof(dmaconf));
-    dmaconf[0] = -1; //don't care
-    //dmaconf[2] = 4;
-    
-    //screenInit();
-    
-    PatPulse(0x7F007F);
-    threadrunning = 1;
-    
-    do
+    while(y < 240)
     {
-        k->packetid = 2; //MODE
-        k->size = 4 * 4;
-        
-        u32* kdata = (u32*)k->data;
-        
-        kdata[0] = 1;
-        kdata[1] = 240 * 3;
-        kdata[2] = 1;
-        kdata[3] = 240 * 3;
-        soc->wribuf();
-    }
-    while(0);
-    
-    while(threadrunning)
-    {
-        if(soc->avail())
-        while(1)
+        while(x < 720)
         {
-            if((kHeld & (KEY_SELECT | KEY_START)) == (KEY_SELECT | KEY_START))
-            {
-                delete soc;
-                soc = nullptr;
-                break;
-            }
+            c = *(wat++);
             
-            puts("reading");
-            cy = soc->readbuf();
-            if(cy <= 0)
-            {
-                printf("Failed to recvbuf: (%i) %s\n", errno, strerror(errno));
-                delete soc;
-                soc = nullptr;
-                break;
-            }
-            else
-            {
-                printf("#%i 0x%X | %i\n", k->packetid, k->size, cy);
-                
-                reread:
-                switch(k->packetid)
-                {
-                    case 0x00: //CONNECT
-                    case 0x01: //ERROR
-                        puts("forced dc");
-                        delete soc;
-                        soc = nullptr;
-                        break;
-                        
-                    case 0x7E: //CFGBLK_IN
-                        memcpy(cfgblk + k->data[0], &k->data[4], min((u32)(0x100 - k->data[0]), (u32)(k->size - 4)));
-                        break;
-                        
-                    default:
-                        printf("Invalid packet ID: %i\n", k->packetid);
-                        delete soc;
-                        soc = nullptr;
-                        break;
-                }
-                
-                break;
-            }
+            if(!c) return;
+            if(c == '\n') break;
+            
+            dest.x = x;
+            dest.y = y;
+            src.x = (c & 0xF) << 3;
+            src.y = ((c >> 4) & 0xF) << 3;
+            
+            SDL_RenderCopyEx(rendertop, font, &src, &dest, 0.0, nullptr, SDL_FLIP_NONE);
+            
+            x += dest.w;
         }
         
-        if(!soc) break;
-        
-        if(cfgblk[0] && GSPGPU_ImportDisplayCaptureInfo(&capin) >= 0)
-        {
-            //test for changed framebuffers
-            if\
-            (\
-                capin.screencapture[0].format != format[0]\
-                ||\
-                capin.screencapture[1].format != format[1]\
-            )
-            {
-                PatStay(0xFFFF00);
-                
-                //fbuf[0] = (u8*)capin.screencapture[0].framebuf0_vaddr;
-                //fbuf[1] = (u8*)capin.screencapture[1].framebuf0_vaddr;
-                format[0] = capin.screencapture[0].format;
-                format[1] = capin.screencapture[1].format;
-                
-                k->packetid = 2; //MODE
-                k->size = 4 * 4;
-                
-                u32* kdata = (u32*)k->data;
-                
-                kdata[0] = format[0];
-                kdata[1] = capin.screencapture[0].framebuf_widthbytesize;
-                kdata[2] = format[1];
-                kdata[3] = capin.screencapture[1].framebuf_widthbytesize;
-                soc->wribuf();
-                
-                k->packetid = 0xFF;
-                k->size = sizeof(capin);
-                *(GSPGPU_CaptureInfo*)k->data = capin;
-                soc->wribuf();
-                
-                
-                if(dmahand)
-                {
-                    svcStopDma(dmahand);
-                    svcCloseHandle(dmahand);
-                    dmahand = 0;
-                }
-                
-                procid = 0;
-                
-                
-                //test for VRAM
-                if\
-                (\
-                    (u32)capin.screencapture[0].framebuf0_vaddr >= 0x1F000000\
-                    &&\
-                    (u32)capin.screencapture[0].framebuf0_vaddr <  0x1F600000\
-                )
-                {
-                    //nothing to do?
-                }
-                else //use APT fuckery, auto-assume application as all retail applets use VRAM framebuffers
-                {
-                    memset(&pat.r[0], 0xFF, 16);
-                    memset(&pat.r[16], 0, 16);
-                    memset(&pat.g[0], 0, 16);
-                    memset(&pat.g[16], 0xFF, 16);
-                    memset(&pat.b[0], 0, 32);
-                    pat.ani = 0x2004;
-                    PatApply();
-                    
-                    u64 progid = -1ULL;
-                    bool loaded = false;
-                    
-                    while(1)
-                    {
-                        loaded = false;
-                        while(1)
-                        {
-                            if(APT_GetAppletInfo((NS_APPID)0x300, &progid, nullptr, &loaded, nullptr, nullptr) < 0) break;
-                            if(loaded) break;
-                            
-                            svcSleepThread(15e6);
-                        }
-                        
-                        if(!loaded) break;
-                        
-                        if(NS_LaunchTitle(progid, 0, &procid) >= 0) break;
-                    }
-                    
-                    if(loaded);// svcOpenProcess(&prochand, procid);
-                    else format[0] = 0xF00FCACE; //invalidate
-                }
-                
-                PatStay(0xFF00);
-            }
-            
-            int loopcnt = 2;
-            
-            while(--loopcnt)
-            {
-                if(format[scr] == 0xF00FCACE)
-                {
-                    scr = !scr;
-                    continue;
-                }
-                
-                k->size = 0;
-                
-                if(dmahand)
-                {
-                    svcStopDma(dmahand);
-                    svcCloseHandle(dmahand);
-                    dmahand = 0;
-                    if(!isold) svcFlushProcessDataCache(0xFFFF8001, (u8*)screenbuf, capin.screencapture[scr].framebuf_widthbytesize * 400);
-                }
-                
-                int imgsize = 0;
-                
-                if((format[scr] & 7) >> 1 || !cfgblk[3])
-                {
-                    init_tga_image(&img, (u8*)screenbuf, scrw, stride[scr], bits);
-                    img.image_type = TGA_IMAGE_TYPE_BGR_RLE;
-                    img.origin_y = (scr * 400) + (stride[scr] * offs[scr]);
-                    tga_write_to_FILE(k->data, &img, &imgsize);
-                    
-                    k->packetid = 3; //DATA (Targa)
-                    k->size = imgsize;
-                }
-                else
-                {
-                    *(u32*)&k->data[0] = (scr * 400) + (stride[scr] * offs[scr]);
-                    u8* dstptr = &k->data[8];
-                    if(!tjCompress2(jencode, (u8*)screenbuf, scrw, bsiz * scrw, stride[scr], format[scr] ? TJPF_RGB : TJPF_RGBX, &dstptr, (u32*)&imgsize, TJSAMP_420, cfgblk[3], TJFLAG_NOREALLOC | TJFLAG_FASTDCT))
-                        k->size = imgsize + 8;
-                    k->packetid = 4; //DATA (JPEG)
-                }
-                //k->size += 4;
-                
-                //svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, fbuf[0] + fboffs, siz, dmaconf);
-                //svcFlushProcessDataCache(prochand ? prochand : 0xFFFF8001, capin.screencapture[0].framebuf0_vaddr, capin.screencapture[0].framebuf_widthbytesize * 400);
-                //svcStartInterProcessDma(&dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001, (u8*)capin.screencapture[0].framebuf0_vaddr + fboffs, siz, dmaconf);
-                //screenDMA(&dmahand, screenbuf, 0x600000 + fboffs, siz, dmaconf);
-                //screenDMA(&dmahand, screenbuf, dbgo, siz, dmaconf);
-                
-                if(++offs[scr] == limit[scr]) offs[scr] = 0;
-                
-                scr = !scr;
-                
-                siz = (capin.screencapture[scr].framebuf_widthbytesize * stride[scr]);
-                
-                bsiz = capin.screencapture[scr].framebuf_widthbytesize / 240;
-                scrw = capin.screencapture[scr].framebuf_widthbytesize / bsiz;
-                bits = 4 << bsiz;
-                
-                if((format[scr] & 7) == 2) bits = 17;
-                if((format[scr] & 7) == 4) bits = 18;
-                
-                Handle prochand = 0;
-                if(procid) if(svcOpenProcess(&prochand, procid) < 0) procid = 0;
-                
-                if\
-                (\
-                    svcStartInterProcessDma\
-                    (\
-                        &dmahand, 0xFFFF8001, screenbuf, prochand ? prochand : 0xFFFF8001,\
-                        (u8*)capin.screencapture[scr].framebuf0_vaddr + (siz * offs[scr]), siz, dmaconf\
-                    )\
-                    < 0 \
-                )
-                {
-                    procid = 0;
-                    format[scr] = 0xF00FCACE; //invalidate
-                }
-                
-                if(prochand)
-                {
-                    svcCloseHandle(prochand);
-                    prochand = 0;
-                }
-                
-                if(k->size) soc->wribuf();
-                /*
-                k->packetid = 0xFF;
-                k->size = 4;
-                *(u32*)k->data = dbgo;
-                soc->wribuf();
-                
-                dbgo += 240 * 3;
-                if(dbgo >= 0x600000) dbgo = 0;
-                */
-                
-                if(isold) svcSleepThread(5e6);
-            }
-        }
-        else yield();
+        x = sx;
+        y += dest.h;
     }
-    
-    memset(&pat.r[0], 0xFF, 16);
-    memset(&pat.g[0], 0xFF, 16);
-    memset(&pat.b[0], 0x00, 16);
-    memset(&pat.r[16],0x7F, 16);
-    memset(&pat.g[16],0x00, 16);
-    memset(&pat.b[16],0x7F, 16);
-    pat.ani = 0x0406;
-    PatApply();
-    
-    if(soc)
-    {
-        delete soc;
-        soc = nullptr;
-    }
-    
-    if(dmahand)
-    {
-        svcStopDma(dmahand);
-        svcCloseHandle(dmahand);
-    }
-    
-    //if(prochand) svcCloseHandle(prochand);
-    //screenExit();
-    
-    threadrunning = 0;
 }
 
-static FILE* f = nullptr;
 
-ssize_t stdout_write(struct _reent* r, int fd, const char* ptr, size_t len)
+int port = 6464;
+SOCKET sock = 0;
+struct sockaddr_in sao;
+socklen_t sizeof_sao = sizeof(sao);
+bufsoc* soc = 0;
+bufsoc::packet* p = 0;
+
+u32* pdata = 0;
+
+
+u8 sbuf[256 * 400 * 4 * 2];
+u8 decbuf[256 * 400 * 4];
+int srcfmt[2] = {3, 3};
+int stride[2] = {480, 480};
+int bsiz[2] = {2, 2};
+int ret = 0;
+
+tga_image tga;
+tga_result res;
+
+tjhandle jdec = nullptr;
+
+
+int main(int argc, char *argv[])
 {
-    if(!f) return 0;
-    fputs("[STDOUT] ", f);
-    return fwrite(ptr, 1, len, f);
-}
-
-ssize_t stderr_write(struct _reent* r, int fd, const char* ptr, size_t len)
-{
-    if(!f) return 0;
-    fputs("[STDERR] ", f);
-    return fwrite(ptr, 1, len, f);
-}
-
-static const devoptab_t devop_stdout = { "stdout", 0, nullptr, nullptr, stdout_write, nullptr, nullptr, nullptr };
-static const devoptab_t devop_stderr = { "stderr", 0, nullptr, nullptr, stderr_write, nullptr, nullptr, nullptr };
-
-int main()
-{
-    mcuInit();
-    nsInit();
-    
-    soc = nullptr;
-    
-    f = fopen("/HzLog.log", "w");
-    if(f <= 0) f = nullptr;
-    else
+    if(argc < 2)
     {
-        devoptab_list[STD_OUT] = &devop_stdout;
-		devoptab_list[STD_ERR] = &devop_stderr;
-
-		setvbuf(stdout, nullptr, _IONBF, 0);
-		setvbuf(stderr, nullptr, _IONBF, 0);
+        printf("%s <IP address>\n", argv[0]);
+        return 1;
     }
     
-    memset(&pat, 0, sizeof(pat));
-    memset(&capin, 0, sizeof(capin));
-    memset(cfgblk, 0, sizeof(cfgblk));
-    
-    isold = APPMEMTYPE <= 5;
-    
-    
-    if(isold)
+    memset(fpsticks, 0, sizeof(fpsticks));
+    if(!inet_pton4(argv[1], (unsigned char*)&sao.sin_addr))
     {
-        limit[0] = 8;
-        limit[1] = 8;
-        stride[0] = 50;
-        stride[1] = 40;
-    }
-    else
-    {
-        limit[0] = 1;
-        limit[1] = 1;
-        stride[0] = 400;
-        stride[1] = 320;
+        printf("Malformatted IP address: '%s'\n", argv[1]);
+        return 1;
     }
     
+#ifdef WIN32
     
-    PatStay(0xFF);
+    WSADATA socHandle;
     
-    acInit();
-    
-    do
+    ret = WSAStartup(MAKEWORD(2,2), &socHandle);
+    if(ret)
     {
-        u32 siz = isold ? 0x10000 : 0x200000;
-        ret = socInit((u32*)memalign(0x1000, siz), siz);
-    }
-    while(0);
-    if(ret < 0) *(u32*)0x1000F0 = ret;//hangmacro();
-    
-    jencode = tjInitCompress();
-    if(!jencode) *(u32*)0x1000F0 = 0xDEADDEAD;//hangmacro();
-    
-    gspInit();
-    
-    //gxInit();
-    
-    if(isold)
-        screenbuf = (u32*)memalign(8, 50 * 240 * 4);
-    else
-        screenbuf = (u32*)memalign(8, 400 * 240 * 4);
-    
-    if(!screenbuf)
-    {
-        makerave();
-        svcSleepThread(2e9);
-        hangmacro();
+        printf("WSAStartup failed: %i\n", ret);
+        return 1;
     }
     
-    
-    if((__excno = setjmp(__exc))) goto killswitch;
-      
-#ifdef _3DS
-    std::set_unexpected(CPPCrashHandler);
-    std::set_terminate(CPPCrashHandler);
 #endif
     
-    netreset:
+    jdec = tjInitDecompress();
+    if(!jdec) errjpeg();
     
-    if(sock)
+    sao.sin_family = AF_INET;
+    sao.sin_port = htons(port);
+    
+    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if(sock <= 0) wsafail(socket);
+    soc = new bufsoc(sock, 0x200000);
+    p = soc->pack();
+    
+    do
     {
-        close(sock);
-        sock = 0;
+        struct timeval timeout;
+        timeout.tv_sec = 15;
+        timeout.tv_usec = 0;
+        
+        //setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    }
+    while(0);
+    
+    ret = connect(sock, (sockaddr*)&sao, sizeof_sao);
+    if(ret < 0) wsafail(connect); 
+    
+    puts("Connected");
+    
+    //SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
+    SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+    SDL_SetHint(SDL_HINT_RENDER_VSYNC, "1");
+#ifdef _WIN32
+    SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
+#endif
+    
+    if(SDL_Init(SDL_INIT_VIDEO) < 0)
+    {
+        printf("Failed to init SDL: %s\n", SDL_GetError());
+        goto killswitch;
     }
     
-    if(haznet && errno == EINVAL)
+    win = SDL_CreateWindow("HorizonScreen " BUILDTIME, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 720, 240, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL);
+    if(!win)
     {
-        errno = 0;
-        PatStay(0xFFFF);
-        while(checkwifi()) yield();
+        printf("Can't create window: %s\n", SDL_GetError());
+        goto killswitch;
     }
     
-    if(checkwifi())
+    rendertop = SDL_CreateRenderer(win, -1, /*SDL_RENDERER_PRESENTVSYNC*/0);
+    
+    img[0] = mksurface(240, 400, 3, 1);
+    img[1] = mksurface(240, 320, 3, 1);
+    
+    font = SDL_CreateTexture(rendertop, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STATIC, 128, 128);
+    
+    SDL_RenderSetLogicalSize(rendertop, 720, 240);
+    
+    do
     {
-        cy = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-        if(cy <= 0)
+        u32* _1 = (u32*)sbuf;
+        
+        int i, j, k;
+        for(i = 0; i != 0x100; i++)
+            for(j = 0; j != 8; j++)
+                for(k = 0; k != 8; k++)
+                    _1[((i >> 4) << 10) + ((i & 0xF) << 3) + (j << 7) + k] = (ctrufont_bin[(i << 3) + j] & (1 << (~k & 7))) ? -1U : 0;
+        
+        SDL_UpdateTexture(font, nullptr, sbuf, 128 * 4);
+        SDL_SetTextureBlendMode(font, SDL_BLENDMODE_BLEND);
+        
+        i = sizeof(sbuf) >> 2;
+        _1 = (u32*)sbuf;
+        while(i--)
         {
-            printf("socket error: (%i) %s\n", errno, strerror(errno));
-            hangmacro();
-        }
-        
-        sock = cy;
-        
-        struct sockaddr_in sao;
-        sao.sin_family = AF_INET;
-        sao.sin_addr.s_addr = gethostid();
-        sao.sin_port = htons(port);
-        
-        if(bind(sock, (struct sockaddr*)&sao, sizeof(sao)) < 0)
-        {
-            printf("bind error: (%i) %s\n", errno, strerror(errno));
-            hangmacro();
-        }
-        
-        //fcntl(sock, F_SETFL, fcntl(sock, F_GETFL, 0) | O_NONBLOCK);
-        
-        if(listen(sock, 1) < 0)
-        {
-            printf("listen error: (%i) %s\n", errno, strerror(errno));
-            hangmacro();
+            *(_1++) = rand();
         }
     }
+    while(0);
+    
+    puts("Sending JPEG quality cfgblk");
+    p->packetid = 0x7E; //CFGBLK_IN
+    p->size = 4 + 1;
+    p->data[0] = 3; //JPEG_QUALITY
+    p->data[4] = 60;
+    if(soc->wribuf() <= 0) wsafail(soc->wribuf);
+    
+    puts("Sending stream enable cfgblk");
+    p->packetid = 0x7E; //CFGBLK_IN
+    p->size = 4 + 1;
+    p->data[0] = 0; //STREAM_ENABLE
+    p->data[4] = 1 | 2; //SCREEN_TOP | SCREEN_BOTTOM
+    if(soc->wribuf() <= 0) wsafail(soc->wribuf);
+    
+    puts("Setup done");
     
     
-    reloop:
-    
-    if(!isold) osSetSpeedupEnable(1);
-    
-    PatPulse(0xFF40FF);
-    if(haznet) PatStay(0xCCFF00);
-    else PatStay(0xFFFF);
-    
-    while(1)
+    while(PumpEvent())
     {
-        hidScanInput();
-        kDown = hidKeysDown();
-        kHeld = hidKeysHeld();
-        kUp = hidKeysUp();
+        //if(!soc->avail()) goto nocoffei;
         
-        //printf("svcGetSystemTick: %016llX\n", svcGetSystemTick());
+        ret = soc->readbuf();
+        if(ret <= 0) wsafail(soc->readbuf);
         
-        if(kDown) PatPulse(0xFF);
-        if(kHeld == (KEY_SELECT | KEY_START)) break;
-        
-        if(!soc)
+        switch(p->packetid)
         {
-            if(!haznet)
-            {
-                if(checkwifi()) goto netreset;
-            }
-            else if(pollsock(sock, POLLIN) == POLLIN)
-            {
-                int cli = accept(sock, (struct sockaddr*)&sai, &sizeof_sai);
-                if(cli < 0)
+            case 0x01: //ERROR
+                printf("Disconnected by error (%i): ", p->data[0]);
+                int i;
+                for(i = 1; i != p->size; i++)
+                    putchar(p->data[i]);
+                putchar('\n');
+                errno = 1;
+                wsafail(slave);
+                break;
+                
+            case 0x02: //MODESET
+                pdata = (u32*)p->data;
+                
+                printf("ModeTOP: %04X (o: %i, bytesize: %i)\n", pdata[0], pdata[0] & 7, pdata[1]);
+                printf("ModeBOT: %04X (o: %i, bytesize: %i)\n", pdata[2], pdata[2] & 7, pdata[3]);
+                
+                if(pdata[1])
                 {
-                    printf("Failed to accept client: (%i) %s\n", errno, strerror(errno));
-                    if(errno == EINVAL) goto netreset;
-                    PatPulse(0xFF);
+                    srcfmt[0] = pdata[0];
+                    stride[0] = pdata[1];
                 }
-                else
+                
+                if(pdata[3])
                 {
-                    PatPulse(0xFF00);
-                    soc = new bufsoc(cli, isold ? 0xC000 : 0x70000);
-                    k = soc->pack();
-                    
-                    if(isold)
-                    {
-                        netthread = threadCreate(netfunc, nullptr, 0x2000, 0x21, 1, true);
-                    }
-                    else
-                    {
-                        netthread = threadCreate(netfunc, nullptr, 0x4000, 8, 3, true);
-                    }
-                    
-                    if(!netthread)
-                    {
-                        memset(&pat, 0, sizeof(pat));
-                        memset(&pat.r[0], 0xFF, 16);
-                        pat.ani = 0x102;
-                        PatApply();
-                        
-                        svcSleepThread(2e9);
-                    }
-                    
-                    
-                    if(netthread)
-                    {
-                        while(!threadrunning) yield();
-                    }
-                    else
-                    {
-                        delete soc;
-                        soc = nullptr;
-                        hangmacro();
-                    }
+                    srcfmt[1] = pdata[2];
+                    stride[1] = pdata[3];
                 }
-            }
-            else if(pollsock(sock, POLLERR) == POLLERR)
+                
+                bsiz[0] = stride[0] / 240;
+                bsiz[1] = stride[1] / 240;
+                
+                SDL_FreeSurface(img[0]);
+                SDL_FreeSurface(img[1]);
+                
+                img[0] = mksurface(stride[0] / bsiz[0], 400, bsiz[0], srcfmt[0]);
+                img[1] = mksurface(stride[1] / bsiz[1], 320, bsiz[1], srcfmt[1]);
+                break;
+            
+            case 0x03: //DATA_TGA
             {
-                printf("POLLERR (%i) %s", errno, strerror(errno));
-                goto netreset;
+                tga.image_data = decbuf;
+                res = tga_read_from_FILE(&tga, p->data);
+                if(res) errtga(read_from_FILE);
+                
+                u32 offs = tga.origin_y;
+                offs = offs / 400 ? (stride[0] * 400) + (stride[1] * (offs % 400)) : stride[0] * offs;
+                
+                memcpy(sbuf + offs, decbuf, tga.height * stride[tga.origin_y / 400]);
+                
+                if(!tga.origin_y)
+                {
+                    u32 prev = SDL_GetTicks() - fpstick;
+                    fpsticks[currwrite++] = prev;
+                    fpstick = SDL_GetTicks();
+                    if(currwrite == FPSNO) currwrite = 0;
+                }
+                break;
             }
+            
+            case 0x04: //DATA_JPEG
+            {
+                int iw = 240;
+                int ih = 1;
+                int sus = 0;
+                
+                u32 offs = *(u32*)&p->data[0];
+                offs = offs / 400 ? (stride[0] * 400) + (stride[1] * (offs % 400)) : stride[0] * offs;
+                
+                tjDecompressHeader2(jdec, &p->data[8], p->size - 8, &iw, &ih, &sus);
+                tjDecompress2(jdec, &p->data[8], p->size - 8, sbuf + offs, iw, 0, ih, (srcfmt[*(u32*)&p->data[0] / 400] & 1) ? TJPF_RGB : TJPF_RGBA, TJFLAG_FASTUPSAMPLE | TJFLAG_NOREALLOC | TJFLAG_FASTDCT);
+                
+                if(!*(u32*)&p->data[0])
+                {
+                    u32 prev = SDL_GetTicks() - fpstick;
+                    fpsticks[currwrite++] = prev;
+                    fpstick = SDL_GetTicks();
+                    if(currwrite == FPSNO) currwrite = 0;
+                }
+                
+                break;
+            }
+            
+            case 0x7E: //CFGBLK_IN
+                //TODO: configblk
+                break;
+            
+            case 0xFF: //DEBUG
+            {
+                printf("DebugMSG (0x%X):", p->size);
+                int i = 0;
+                while(i < p->size)
+                {
+                    printf(" %08X", *(u32*)&p->data[i]);
+                    i += 4;
+                }
+                putchar('\n');
+                
+                break;
+            }
+            
+            default:
+                printf("Unknown packet: %i\n", p->packetid);
+                break;
         }
         
-        if(netthread && !threadrunning)
+        
+        nocoffei:
+        
+        if(img[0])
         {
-            //TODO todo?
-            netthread = nullptr;
-            goto reloop;
+            SDL_LockSurface(img[0]);
+            memcpy(img[0]->pixels, sbuf, stride[0] * 400);
+            SDL_UnlockSurface(img[0]);
+            
+            SDL_DestroyTexture(tex[0]);
+            tex[0] = SDL_CreateTextureFromSurface(rendertop, img[0]);
         }
+        else puts("img[0] nullptr!");
         
-        if((kHeld & (KEY_ZL | KEY_ZR)) == (KEY_ZL | KEY_ZR))
+        if(img[1])
         {
-            u32* ptr = (u32*)0x1F000000;
-            int o = 0x00600000 >> 2;
-            while(o--) *(ptr++) = rand();
+            SDL_LockSurface(img[1]);
+            memcpy(img[1]->pixels, sbuf + (stride[0] * 400), stride[1] * 320);
+            SDL_UnlockSurface(img[1]);
+            
+            SDL_DestroyTexture(tex[1]);
+            tex[1] = SDL_CreateTextureFromSurface(rendertop, img[1]);
         }
+        else puts("img[1] nullptr!");
         
-        yield();
+        SDL_Point center;
+        center.x = 0;
+        center.y = 0;
+        
+        SDL_Rect soos;
+        soos.x = 0;
+        soos.y = 0;
+        soos.w = 240;
+        soos.h = 400;
+        
+        SDL_Rect dest;
+        dest.x = 0;
+        dest.y = 240;
+        dest.w = 240;
+        dest.h = 400;
+        SDL_RenderCopyEx(rendertop, tex[0], &soos, &dest, 270.0F, &center, SDL_FLIP_NONE);
+        
+        soos.x = 0;
+        soos.y = 0;
+        soos.w = 240;
+        soos.h = 320;
+        
+        dest.x = 400;
+        dest.y = 240;
+        dest.w = 240;
+        dest.h = 320;
+        SDL_RenderCopyEx(rendertop, tex[1], &soos, &dest, 270.0F, &center, SDL_FLIP_NONE);
+        
+        
+        snprintf(printbuf, sizeof(printbuf), "HzScreen " BUILDTIME "\n\nFPS: %.1f", fps);
+        drawtext(printbuf, 408, 8, 0xFF7F00, 2, 3);
+        //drawtext("ohaii :D\nmultiline test\nkek\n\neh", 16, 8, 0xFF);
+        //drawtext("scaled text\nmultiline too!", 16, 80, 0xFF7F00, 2, 4);
+        //drawtext(";)", 16, 144, 0xFF00, 5, 5);
+        //drawtext("\x0B", 122, 144, 0xFF0000, 5, 5);
+        //drawtext("\x0B", 122 + 16, 144 + 16, 0x0000FF, 5, 5);
+        
+        
+        SDL_RenderPresent(rendertop);
+        
+        if(oldwrite != currwrite)
+        {
+            float currfps = 0.0F;
+            for(int i = 0; i != FPSNO; i++) currfps += fpsticks[i];
+            currfps /= FPSNO;
+            fps = 1000.0F / currfps;
+            //printf("FPS: %f\n", fps);            
+            oldwrite = currwrite;
+        }
     }
     
     killswitch:
     
-    PatStay(0xFF0000);
-    
-    if(netthread)
-    {
-        threadrunning = 0;
-        
-        volatile bufsoc** vsoc = (volatile bufsoc**)&soc;
-        while(*vsoc) yield(); //pls don't optimize kthx
-    }
-    
     if(soc) delete soc;
-    else close(sock);
     
-    puts("Shutting down sockets...");
-    SOCU_ShutdownSockets();
+    if(tex[0]) SDL_DestroyTexture(tex[0]);
+    if(tex[1]) SDL_DestroyTexture(tex[1]);
+    if(img[0]) SDL_FreeSurface(img[0]);
+    if(img[1]) SDL_FreeSurface(img[1]);
     
-    socExit();
+    if(font) SDL_DestroyTexture(font);
     
-    //gxExit();
+    if(rendertop) SDL_DestroyRenderer(rendertop);    
+    if(win) SDL_DestroyWindow(win);
+    SDL_Quit();
     
-    gspExit();
-    
-    acExit();
-    
-    if(f)
-    {
-        fflush(f);
-        fclose(f);
-    }
-    
-    PatStay(0);
-    
-    nsExit();
-    
-    mcuExit();
+#ifdef WIN32
+    WSACleanup();
+#endif
     
     return 0;
 }
