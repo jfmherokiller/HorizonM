@@ -17,4 +17,4 @@ cache:
     apt: true
     ccache: true
     directories:
-    - $HOME/deps
+    - /opt/sdl2

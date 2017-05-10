@@ -8,12 +8,12 @@ fi
 
 if [[ "$TRAVIS_OS_NAME" == "linux" ]]
 then
-    if [ ! -d "$HOME/deps" ]; then
-        mkdir -p $HOME/deps
+    if [ ! -d "/opt/sdl2" ]; then
+        mkdir -p /opt/sdl2
         wget https://www.libsdl.org/release/SDL2-2.0.5.tar.gz
         tar xf SDL2-2.0.5.tar.gz
         cd SDL2-2.0.5
-        ./configure --prefix=$HOME/deps
+        ./configure --prefix=/opt/sdl2
         make
         make install
     fi
