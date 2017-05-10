@@ -14,6 +14,7 @@ mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Debug -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON -DCMAKE_INSTALL_PREFIX:PATH=$HOME/built ..
 make
+make install
 make package
 
 

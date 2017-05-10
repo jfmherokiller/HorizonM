@@ -35,6 +35,9 @@ endif()
 add_dependencies(HorizonScreen ctrufont)
 target_link_libraries(HorizonScreen ${LIBS})
 
+install(TARGETS ${EXECUTABLE_NAME} DESTINATION bin)
 
-SET(CPACK_GENERATOR "ZIP")
-INCLUDE(CPack)
+# CPack packaging
+include(InstallRequiredSystemLibraries)
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+include(CPack)
