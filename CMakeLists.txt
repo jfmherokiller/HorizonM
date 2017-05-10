@@ -39,7 +39,7 @@ install (TARGETS HorizonScreen BUNDLE DESTINATION ${CMAKE_INSTALL_PREFIX} RUNTIM
 elseif(WIN32)
 elseif(UNIX)
     install (TARGETS HorizonScreen RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
-
+    include(GetPrerequisites)
     get_prerequisites(${CMAKE_INSTALL_PREFIX}/bin/HorizonScreen DEPENDENCIES 0 0 "" "")
 
     foreach(DEPENDENCY_FILE ${DEPENDENCIES})
